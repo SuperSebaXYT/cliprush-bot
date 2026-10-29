@@ -1,0 +1,1 @@
+# Add one authorized VOD URL per line. Do not add sources without permission to reuse.
