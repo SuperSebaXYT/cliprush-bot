@@ -127,6 +127,23 @@ with tab_settings:
         clips_per_source = st.slider("Klipy na źródło", 1, 5, int(config.get("clips_per_source", 2)))
         duration = st.slider("Docelowa długość klipu (sekundy)", 20, 55, int(config.get("clip_duration_seconds", 35)))
         max_sources = st.slider("Maksymalna liczba źródeł na uruchomienie", 1, 5, int(config.get("max_sources_per_run", 2)))
+        st.divider()
+        st.subheader("Automatyczny wybór VOD-ów")
+        auto_discovery = st.toggle("Automatycznie wyszukuj najnowsze VOD-y", value=bool(config.get("auto_discovery_enabled", True)))
+        discovery_channels_text = st.text_area(
+            "Kanały YouTube, po jednym URL na linię",
+            value="\n".join(config.get("discovery_channels", [
+                "https://www.youtube.com/@IShowSpeed/videos",
+                "https://www.youtube.com/@KaiCenat/videos",
+                "https://www.youtube.com/@CaseOh_/videos",
+            ])),
+            height=110,
+        )
+        scan_per_channel = st.slider("Ile najnowszych filmów sprawdzać z każdego kanału", 5, 50,
+                                     int(config.get("discovery_scan_per_channel", 30)), step=5)
+        max_age_days = st.slider("Maksymalny wiek VOD-a (dni)", 1, 90, int(config.get("max_source_age_days", 30)))
+        min_source_minutes = st.slider("Minimalna długość źródła (minuty)", 5, 60,
+                                       max(5, int(config.get("min_source_duration_seconds", 600)) // 60))
         language = st.selectbox("Język transkrypcji", ["en", "pl", "auto"],
                                 index=["en", "pl", "auto"].index(config.get("language", "en"))
                                 if config.get("language", "en") in ["en", "pl", "auto"] else 0)
@@ -145,8 +162,8 @@ with tab_settings:
         tags_text = st.text_input("Tagi oddzielone przecinkami", value=", ".join(config.get("tags", [])))
         submitted = st.form_submit_button("💾 Zapisz ustawienia")
     if submitted:
-        if publish and not cleaned:
-            st.error("Najpierw dodaj źródła dozwolone do ponownej publikacji.")
+        if publish and not cleaned and not auto_discovery:
+            st.error("Włącz automatyczne wyszukiwanie albo dodaj źródła dozwolone do ponownej publikacji.")
         else:
             new_config = dict(config)
             new_config.update({
@@ -155,6 +172,12 @@ with tab_settings:
                 "min_clip_seconds": min(20, duration),
                 "max_clip_seconds": min(55, duration),
                 "max_sources_per_run": max_sources,
+                "auto_discovery_enabled": auto_discovery,
+                "discovery_channels": [x.strip() for x in discovery_channels_text.splitlines()
+                                        if x.strip() and not x.strip().startswith("#")],
+                "discovery_scan_per_channel": scan_per_channel,
+                "max_source_age_days": max_age_days,
+                "min_source_duration_seconds": min_source_minutes * 60,
                 "language": language,
                 "whisper_model": model,
                 "publish": publish,
@@ -192,13 +215,14 @@ with tab_runs:
 
 st.divider()
 st.subheader("Uruchom clipping")
-st.write(f"Źródeł w liście: **{len(cleaned)}** · Klipów na źródło: **{config.get('clips_per_source', 2)}**")
+st.write(f"Ręczne źródła: **{len(cleaned)}** · Auto-discovery: **{'włączone' if config.get('auto_discovery_enabled', False) else 'wyłączone'}** · Klipów na źródło: **{config.get('clips_per_source', 2)}**")
 if st.button("🚀 Zapisz najpierw ustawienia, potem uruchom bota", type="primary", key="run_bot"):
     try:
         # Prevent dispatch when there are no source URLs.
         current_sources, _ = read_file("sources.txt")
-        if not [x for x in current_sources.splitlines() if x.strip() and not x.strip().startswith("#")]:
-            st.error("Dodaj i zapisz co najmniej jeden dozwolony adres VOD.")
+        has_manual = bool([x for x in current_sources.splitlines() if x.strip() and not x.strip().startswith("#")])
+        if not has_manual and not config.get("auto_discovery_enabled", False):
+            st.error("Włącz automatyczne wyszukiwanie w Ustawieniach albo dodaj adres VOD.")
         else:
             trigger_workflow()
             st.success("Wysłano żądanie uruchomienia. Sprawdź zakładkę Uruchomienia za chwilę.")

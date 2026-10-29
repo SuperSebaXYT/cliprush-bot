@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 from faster_whisper import WhisperModel
+from source_discovery import discover_sources, _load_processed, save_processed
 
 ROOT = Path(__file__).resolve().parent
 
@@ -16,21 +17,45 @@ def run(cmd):
 def load_config():
     return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 
-def get_sources(limit):
+def get_manual_sources(limit):
     path = ROOT / "sources.txt"
     if not path.exists():
-        raise FileNotFoundError("Create sources.txt and add authorized VOD URLs.")
+        return []
     return [x.strip() for x in path.read_text(encoding="utf-8").splitlines()
             if x.strip() and not x.strip().startswith("#")][:limit]
 
-def download_source(url, work_dir):
+
+def get_sources(cfg):
+    limit = int(cfg.get("max_sources_per_run", 2))
+    sources = []
+    if cfg.get("auto_discovery_enabled", False):
+        sources.extend(discover_sources(cfg, limit=limit))
+    existing_urls = {item["url"] for item in sources}
+    if len(sources) < limit:
+        for url in get_manual_sources(limit):
+            if url not in existing_urls:
+                sources.append({"url": url, "is_live": False, "id": url})
+                existing_urls.add(url)
+            if len(sources) >= limit:
+                break
+    return sources[:limit]
+
+def download_source(source, work_dir, cfg):
+    url = source["url"]
     template = work_dir / "source.%(ext)s"
-    run([sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-         "-f", "bv*+ba/b", "--merge-output-format", "mp4", "-o", str(template), url])
+    if source.get("is_live"):
+        # Record only a bounded live segment, rather than waiting for a broadcast that may run for hours.
+        duration = max(120, int(source.get("live_capture_seconds") or cfg.get("live_capture_seconds", 480)))
+        hh, rem = divmod(duration, 3600); mm, ss = divmod(rem, 60)
+        duration_arg = f"{hh:02d}:{mm:02d}:{ss:02d}"
+        run(["streamlink", "--hls-duration", duration_arg, url, "best", "-o", str(work_dir / "source.ts")])
+    else:
+        run([sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+             "-f", "bv*+ba/b", "--merge-output-format", "mp4", "-o", str(template), url])
     candidates = [p for p in sorted(work_dir.glob("source.*"))
-                  if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}]
+                  if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".ts"} and p.stat().st_size > 0]
     if not candidates:
-        raise RuntimeError("No source video was found after download.")
+        raise RuntimeError("No source video was found after download/recording.")
     return candidates[0]
 
 def probe_duration(path):
@@ -135,15 +160,18 @@ def main():
     work_root = ROOT / cfg.get("work_dir", "work")
     out_root = ROOT / cfg.get("output_dir", "output")
     work_root.mkdir(exist_ok=True); out_root.mkdir(exist_ok=True)
-    sources = get_sources(int(cfg.get("max_sources_per_run", 2)))
+    sources = get_sources(cfg)
     if not sources:
-        print("No source URLs configured."); return
+        print("No eligible VODs discovered and no manual source URLs configured.")
+        return
+    processed = _load_processed()
     index = 0
-    for source_i, url in enumerate(sources, 1):
+    for source_i, source_info in enumerate(sources, 1):
+        url = source_info["url"]
         work = work_root / f"source_{source_i}"
         work.mkdir(parents=True, exist_ok=True)
         try:
-            video = download_source(url, work)
+            video = download_source(source_info, work, cfg)
             duration = probe_duration(video)
             segments, _ = transcribe(video, cfg)
             for item in choose_windows(segments, duration, cfg):
@@ -155,6 +183,12 @@ def main():
                 print(f"Rendered {dest}; score={item['score']:.2f}", flush=True)
                 if cfg.get("publish", False):
                     upload(dest, cfg, index)
+            # Mark the source only after the full source pipeline succeeds, preventing repeats.
+            video_id = str(source_info.get("id") or (url.split("v=", 1)[1].split("&", 1)[0] if "v=" in url else url.rstrip("/").split("/")[-1]))
+            # A live stream is revisited on the next scheduled run, so don't permanently mark it processed.
+            if not source_info.get("is_live"):
+                processed.add(video_id)
+                save_processed(processed)
         except Exception as exc:
             print(f"ERROR processing {url}: {exc}", file=sys.stderr, flush=True)
             raise

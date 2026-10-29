@@ -6,3 +6,4 @@ google-auth-oauthlib>=1.2.1
 google-auth-httplib2>=0.2.0
 streamlit>=1.41.0
 requests>=2.32.0
+streamlink>=7.0.0

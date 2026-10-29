@@ -11,7 +11,21 @@
   "category_id": "20",
   "title_prefix": "ClipRush",
   "description": "Edited highlight. Source material must be authorized for reuse.",
-  "tags": ["shorts", "highlights", "cliprush"],
+  "tags": [
+    "shorts",
+    "highlights",
+    "cliprush"
+  ],
   "output_dir": "output",
-  "work_dir": "work"
+  "work_dir": "work",
+  "auto_discovery_enabled": true,
+  "discovery_channels": [
+    "https://www.youtube.com/@IShowSpeed",
+    "https://www.youtube.com/@KaiCenat",
+    "https://www.youtube.com/@CaseOh_"
+  ],
+  "discovery_scan_per_channel": 30,
+  "min_source_duration_seconds": 600,
+  "max_source_age_days": 30,
+  "live_capture_seconds": 480
 }
