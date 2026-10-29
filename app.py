@@ -1,7 +1,7 @@
 import base64
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 import streamlit as st
@@ -99,7 +99,94 @@ with st.container(border=True):
     st.write(f"Branch: `{BRANCH}`")
     st.caption("Zmiany zapisują się bezpośrednio w repozytorium. Nie umieszczaj tu kluczy ani prywatnych tokenów.")
 
-tab_sources, tab_settings, tab_runs = st.tabs(["📺 Źródła", "⚙️ Ustawienia", "📊 Uruchomienia"])
+tab_sources, tab_settings, tab_runs, tab_auth = st.tabs(["📺 Źródła", "⚙️ Ustawienia", "📊 Uruchomienia", "🔑 Token YouTube"]) 
+
+with tab_auth:
+    st.subheader("Autoryzacja nowego kanału YouTube")
+    st.warning("Nie udostępniaj Client Secret ani wygenerowanego tokenu. W tym panelu token jest wyświetlany tylko po wymianie kodu OAuth.")
+    st.write("Ta metoda działa w przeglądarce telefonu. W Google Cloud utwórz klienta OAuth typu **Aplikacja internetowa** i ustaw dokładny URI przekierowania na adres tej aplikacji Streamlit, z ukośnikiem na końcu, np. `https://twoja-aplikacja.streamlit.app/`. Ten sam adres wpisz poniżej.")
+    with st.form("youtube_oauth_start"):
+        oauth_client_id = st.text_input("OAuth Client ID", key="oauth_client_id")
+        oauth_client_secret = st.text_input("OAuth Client Secret", type="password", key="oauth_client_secret")
+        oauth_redirect_uri = st.text_input("Redirect URI aplikacji Streamlit", key="oauth_redirect_uri", placeholder="https://twoja-aplikacja.streamlit.app/")
+        start_oauth = st.form_submit_button("Utwórz link logowania Google")
+    if start_oauth:
+        if not oauth_client_id.strip() or not oauth_client_secret.strip() or not oauth_redirect_uri.startswith("https://"):
+            st.error("Wpisz Client ID, Client Secret i pełny HTTPS Redirect URI.")
+        else:
+            import secrets as _secrets
+            st.session_state["oauth_state"] = _secrets.token_urlsafe(24)
+            st.session_state["oauth_client_id_saved"] = oauth_client_id.strip()
+            st.session_state["oauth_client_secret_saved"] = oauth_client_secret.strip()
+            st.session_state["oauth_redirect_uri_saved"] = oauth_redirect_uri.strip()
+            from urllib.parse import urlencode
+            params = {
+                "client_id": oauth_client_id.strip(),
+                "redirect_uri": oauth_redirect_uri.strip(),
+                "response_type": "code",
+                "scope": "https://www.googleapis.com/auth/youtube.upload",
+                "access_type": "offline",
+                "prompt": "consent",
+                "include_granted_scopes": "true",
+                "state": st.session_state["oauth_state"],
+            }
+            auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+            st.link_button("Zaloguj się na konto nowego kanału", auth_url, use_container_width=True)
+            st.caption("Po zatwierdzeniu Google wróci do tej aplikacji. Nie zamykaj karty panelu.")
+
+    callback_code = st.query_params.get("code", "")
+    callback_state = st.query_params.get("state", "")
+    if callback_code:
+        st.info("Google zwrócił kod autoryzacyjny. Sprawdź, czy stan zgadza się z tym zapisanym przy tworzeniu linku.")
+        expected_state = st.session_state.get("oauth_state", "")
+        if expected_state and callback_state and callback_state == expected_state:
+            st.success("Kontrola state zakończona powodzeniem.")
+        else:
+            st.error("Nie można potwierdzić sesji OAuth w tym panelu. Wróć do zakładki Token YouTube i utwórz link ponownie w tej samej sesji przeglądarki.")
+        st.text_input("Kod OAuth z adresu strony", value=callback_code, key="oauth_callback_code")
+
+    if st.session_state.get("oauth_client_id_saved") and st.session_state.get("oauth_client_secret_saved") and st.session_state.get("oauth_redirect_uri_saved"):
+        with st.form("youtube_oauth_exchange"):
+            auth_code = st.text_input("Kod autoryzacyjny (wypełniony automatycznie po powrocie z Google)", value=st.query_params.get("code", ""))
+            exchange = st.form_submit_button("Wygeneruj token")
+        if exchange:
+            if not auth_code.strip():
+                st.error("Brakuje kodu autoryzacyjnego. Najpierw zaloguj się przez link Google.")
+            elif st.query_params.get("state", "") != st.session_state.get("oauth_state", ""):
+                st.error("Nie zgadza się parametr state. Utwórz nowy link logowania i dokończ proces w tej samej sesji.")
+            else:
+                try:
+                    token_response = requests.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "code": auth_code.strip(),
+                            "client_id": st.session_state["oauth_client_id_saved"],
+                            "client_secret": st.session_state["oauth_client_secret_saved"],
+                            "redirect_uri": st.session_state["oauth_redirect_uri_saved"],
+                            "grant_type": "authorization_code",
+                        }, timeout=30)
+                    if not token_response.ok:
+                        st.error(f"Google odrzucił wymianę kodu ({token_response.status_code}). Sprawdź typ klienta i identyczny Redirect URI.")
+                    else:
+                        tok = token_response.json()
+                        if not tok.get("refresh_token"):
+                            st.error("Google nie zwrócił refresh_token. Utwórz link ponownie; sprawdź access_type=offline i prompt=consent.")
+                        else:
+                            token_json = {
+                                "token": tok.get("access_token"),
+                                "refresh_token": tok.get("refresh_token"),
+                                "token_uri": "https://oauth2.googleapis.com/token",
+                                "expiry": (datetime.now(timezone.utc) + timedelta(seconds=int(tok.get("expires_in", 3600)))).isoformat().replace("+00:00", "Z"),
+                                "client_id": st.session_state["oauth_client_id_saved"],
+                                "client_secret": st.session_state["oauth_client_secret_saved"],
+                                "scopes": ["https://www.googleapis.com/auth/youtube.upload"],
+                                "universe_domain": "googleapis.com",
+                            }
+                            st.success("Token utworzony. Skopiuj poniższy JSON i wklej go do GitHub Secret YOUTUBE_TOKEN_JSON.")
+                            st.code(json.dumps(token_json, indent=2), language="json")
+                            st.warning("To pełny dostęp do publikowania na Twoim kanale. Nie udostępniaj JSON-u i nie zapisuj go w repozytorium.")
+                except Exception as exc:
+                    st.error(f"Nie udało się połączyć z Google: {exc}")
 
 with tab_sources:
     st.subheader("Źródła streamów")
