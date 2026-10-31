@@ -7,7 +7,7 @@
   "whisper_model": "small",
   "max_sources_per_run": 1,
   "publish": true,
-  "privacy_status": "private",
+  "privacy_status": "public",
   "category_id": "20",
   "title_prefix": "ClipRush",
   "description": "Edited highlight. Source material must be authorized for reuse.",
