@@ -2,19 +2,19 @@
   "clips_per_source": 2,
   "clip_duration_seconds": 35,
   "min_clip_seconds": 20,
-  "max_clip_seconds": 35,
+  "max_clip_seconds": 55,
   "language": "en",
   "whisper_model": "small",
   "max_sources_per_run": 2,
-  "publish": true,
+  "publish": false,
   "privacy_status": "private",
   "category_id": "20",
   "title_prefix": "ClipRush",
   "description": "Edited highlight. Source material must be authorized for reuse.",
   "tags": [
-    "clips",
+    "shorts",
     "highlights",
-    "shorts"
+    "cliprush"
   ],
   "output_dir": "output",
   "work_dir": "work",
