@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Color
 import android.os.Bundle
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -16,7 +18,6 @@ import android.webkit.WebResourceRequest
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 
 class MainActivity : Activity() {
@@ -32,10 +33,10 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val root = FrameLayout(this)
-        root.setBackgroundColor(Color.rgb(9, 9, 20))
+        root.setBackgroundColor(Color.rgb(8, 7, 17))
 
         webView = WebView(this).apply {
-            setBackgroundColor(Color.rgb(9, 9, 20))
+            setBackgroundColor(Color.rgb(8, 7, 17))
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             settings.javaScriptEnabled = true
@@ -116,13 +117,49 @@ class MainActivity : Activity() {
         }
         content.addView(subtitle)
 
-        val progress = ProgressBar(this).apply {
-            isIndeterminate = true
+        val bars = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
         }
-        val progressParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply {
-            topMargin = dp(30)
+        val barColors = intArrayOf(
+            Color.rgb(139, 92, 246),
+            Color.rgb(168, 85, 247),
+            Color.rgb(192, 132, 252),
+            Color.rgb(34, 211, 238),
+            Color.rgb(14, 165, 233),
+            Color.rgb(139, 92, 246),
+            Color.rgb(168, 85, 247)
+        )
+        for (i in 0 until 7) {
+            val bar = View(this).apply {
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(barColors[i])
+                    cornerRadius = dp(5).toFloat()
+                }
+                transformPivotY = dp(22).toFloat()
+            }
+            val params = LinearLayout.LayoutParams(dp(6), dp(34)).apply {
+                leftMargin = dp(5)
+                rightMargin = dp(5)
+            }
+            bars.addView(bar, params)
+            ObjectAnimator.ofPropertyValuesHolder(
+                bar,
+                PropertyValuesHolder.ofFloat("scaleY", 0.28f, 1.0f, 0.28f)
+            ).apply {
+                duration = 850
+                startDelay = i * 105L
+                repeatCount = ObjectAnimator.INFINITE
+                repeatMode = ObjectAnimator.RESTART
+                start()
+            }
         }
-        content.addView(progress, progressParams)
+        val loaderParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)
+        ).apply {
+            topMargin = dp(28)
+        }
+        content.addView(bars, loaderParams)
 
         background.addView(content, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
