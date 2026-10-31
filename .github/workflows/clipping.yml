@@ -39,7 +39,7 @@ jobs:
         run: |
           docker run -d --name bgutil-provider --network host brainicism/bgutil-ytdlp-pot-provider:latest
           for i in {1..30}; do
-            if curl --silent --fail http://127.0.0.1:4416/ >/dev/null; then
+            if curl --silent http://127.0.0.1:4416/ >/dev/null; then
               echo "BgUtils PO token provider is responding."
               break
             fi
