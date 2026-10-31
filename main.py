@@ -189,6 +189,8 @@ def download_source(
                 "3",
                 "--extractor-retries",
                 "3",
+                "--js-runtimes",
+                "node",
                 "--format",
                 selector,
                 "--merge-output-format",
@@ -212,6 +214,32 @@ def download_source(
                     f"Trying next option.",
                     flush=True,
                 )
+
+                # Capture the formats yt-dlp can actually see. This makes
+                # YouTube client / cookie / PO-token failures diagnosable.
+                diagnostic_command = [
+                    sys.executable,
+                    "-m",
+                    "yt_dlp",
+                    "--no-playlist",
+                    "--no-warnings",
+                    "--list-formats",
+                    "--js-runtimes",
+                    "node",
+                ]
+                diagnostic_command.extend(cookie_args)
+                diagnostic_command.append(source["url"])
+
+                try:
+                    run_command(
+                        diagnostic_command,
+                        f"Diagnosing available formats: {source['title']}",
+                    )
+                except Exception as diagnostic_error:
+                    print(
+                        f"Format diagnostic failed: {diagnostic_error}",
+                        flush=True,
+                    )
                 continue
 
             candidates = [
