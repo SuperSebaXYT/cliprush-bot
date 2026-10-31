@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -571,6 +572,98 @@ def select_clips(
     )
     return sorted(selected, key=lambda item: item["start"])
 
+
+def analyze_clip_with_vision(video_path: Path, clip: dict, segments: list[dict], config: dict, work_dir: Path) -> dict:
+    """Analyze sampled frames with Groq Vision and generate accurate upload metadata."""
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        print("GROQ_API_KEY missing; using default clip metadata.", flush=True)
+        return {}
+    import requests
+
+    model = os.environ.get("GROQ_VISION_MODEL", config.get("groq_vision_model", "qwen/qwen3.8-27b"))
+    start, end = float(clip["start"]), float(clip["end"])
+    duration = end - start
+    frame_paths = []
+    try:
+        # Groq currently documents a maximum of three images per request.
+        for index, fraction in enumerate((0.18, 0.52, 0.84), start=1):
+            frame_path = work_dir / f"vision_{video_path.stem}_{index}.jpg"
+            timestamp = start + duration * fraction
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-ss", f"{timestamp:.3f}", "-i", str(video_path),
+                 "-frames:v", "1", "-vf", "scale='min(640,iw)':-2",
+                 "-q:v", "8", str(frame_path)],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            if result.returncode == 0 and frame_path.exists() and frame_path.stat().st_size:
+                frame_paths.append(frame_path)
+
+        if not frame_paths:
+            print("WARNING: Could not extract frames for visual analysis.", flush=True)
+            return {}
+
+        transcript = "\n".join(
+            f"[{item['start']:.1f}-{item['end']:.1f}] {item['text']}"
+            for item in segments if item["end"] > start and item["start"] < end
+        )[:6500]
+        content = [{
+            "type": "text",
+            "text": (
+                "You are an expert Shorts editor. Analyze these ordered frames together "
+                "with the transcript. Describe only events supported by the images/audio. "
+                "Return ONLY JSON with keys: visual_summary (one sentence), title (max "
+                "85 characters, accurate and engaging), description (1-3 sentences), "
+                "tags (array of 3-6 short tags), reason (one sentence). Transcript:\n"
+                + transcript
+            ),
+        }]
+        for frame_path in frame_paths:
+            encoded = base64.b64encode(frame_path.read_bytes()).decode("ascii")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
+            })
+
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Analyze video frames and write accurate YouTube metadata. Return valid JSON only."},
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0.2,
+                "max_completion_tokens": 700,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        data = json.loads(response.json()["choices"][0]["message"]["content"])
+        tags = [str(tag).strip().replace("#", "")[:30] for tag in data.get("tags", []) if str(tag).strip()]
+        metadata = {
+            "title": str(data.get("title", "")).strip()[:100],
+            "description": str(data.get("description", "")).strip()[:4500],
+            "tags": list(dict.fromkeys(tags[:6] + ["shorts", "cliprush"])),
+            "visual_summary": str(data.get("visual_summary", "")).strip()[:500],
+            "reason": str(data.get("reason", "")).strip()[:300],
+        }
+        print(f"Groq Vision ({model}) summary: {metadata['visual_summary']}", flush=True)
+        print(f"AI title: {metadata['title']}", flush=True)
+        return metadata
+    except Exception as exc:
+        print(f"WARNING: Groq Vision analysis failed: {exc}. Using default upload metadata.", flush=True)
+        return {}
+    finally:
+        for frame_path in frame_paths:
+            try:
+                frame_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def create_srt(
     segments: list[dict],
     clip_start: float,
@@ -684,6 +777,7 @@ def render_clip(
 def upload_to_youtube(
     video_path: Path,
     config: dict,
+    metadata: dict | None = None,
 ) -> None:
     if not config.get("publish", False):
         print("Publishing disabled. Keeping clip as artifact.", flush=True)
@@ -711,11 +805,12 @@ def upload_to_youtube(
         credentials=credentials,
     )
 
+    metadata = metadata or {}
     title_prefix = config.get("title_prefix", "ClipRush")
-    title = f"{title_prefix} | {video_path.stem}"
+    title = metadata.get("title") or f"{title_prefix} | {video_path.stem}"
 
-    description = config.get("description", "")
-    tags = config.get("tags", [])
+    description = metadata.get("description") or config.get("description", "")
+    tags = metadata.get("tags") or config.get("tags", [])
     privacy = config.get("privacy_status", "private")
 
     body = {
@@ -828,6 +923,11 @@ def main() -> None:
                     f"{source_id}_clip_{index}.mp4"
                 )
 
+                print("Analyzing selected clip with Groq Vision...", flush=True)
+                metadata = analyze_clip_with_vision(
+                    video_path, clip, segments, config, work_dir
+                )
+
                 render_clip(
                     video_path,
                     clip,
@@ -836,9 +936,16 @@ def main() -> None:
                     config,
                 )
 
+                metadata_path = output_path.with_suffix(".json")
+                metadata_path.write_text(
+                    json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+
                 upload_to_youtube(
                     output_path,
                     config,
+                    metadata,
                 )
 
             if not source.get("is_live"):
