@@ -142,7 +142,7 @@ def download_source(
     cookie_args = []
 
     if cookie_text:
-        cookie_file.write_text(cookie_text + "\\n", encoding="utf-8")
+        cookie_file.write_text(cookie_text, encoding="utf-8")
         cookie_args = ["--cookies", str(cookie_file)]
         print("YouTube cookies found; authenticated download will be tried first.", flush=True)
     else:
