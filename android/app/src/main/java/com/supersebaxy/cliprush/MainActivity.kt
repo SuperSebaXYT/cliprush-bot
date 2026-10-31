@@ -272,21 +272,23 @@ private fun ClipRushApp() {
                     Text("Połącz GitHub", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = white)
                     Text("Bez wklejania PAT. Zaloguj się bezpiecznie przez kod urządzenia GitHub.", color = Color.LightGray, fontSize = 13.sp)
                     Spacer(Modifier.height(16.dp))
-                    ActionButton(if (userCode.isBlank()) "ZALOGUJ PRZEZ GITHUB" else "OTWÓRZ GITHUB I WPISZ KOD", busy) {
+                    ActionButton(
+                        when {
+                            userCode.isBlank() -> "ZALOGUJ PRZEZ GITHUB"
+                            else -> "SPRAWDŹ POŁĄCZENIE"
+                        },
+                        busy
+                    ) {
                         task {
-                            var pollingInterval = 5L
                             if (deviceCode.isBlank()) {
                                 val auth = withContext(Dispatchers.IO) { requestDeviceCode() }
-                                pollingInterval = auth.optLong("interval", 5L).coerceAtLeast(5L)
                                 deviceCode = auth.getString("device_code")
                                 userCode = auth.getString("user_code")
                                 verificationUri = auth.optString("verification_uri", "https://github.com/login/device")
                                 uriHandler.openUri(verificationUri)
+                                message = "Wpisz kod na stronie GitHub, zatwierdź dostęp i wróć tutaj."
                             } else {
-                                uriHandler.openUri(verificationUri)
-                            }
-                            if (deviceCode.isNotBlank()) {
-                                var interval = pollingInterval
+                                var interval = 5L
                                 val expiresAt = System.currentTimeMillis() + 15L * 60L * 1000L
                                 var authorized = false
                                 while (System.currentTimeMillis() < expiresAt && !authorized) {
@@ -302,7 +304,11 @@ private fun ClipRushApp() {
                                         "authorization_pending" -> Unit
                                         "slow_down" -> interval += 5L
                                         "access_denied" -> throw IllegalStateException("Logowanie zostało anulowane na GitHubie.")
-                                        "expired_token", "token_expired" -> throw IllegalStateException("Kod wygasł. Rozpocznij logowanie ponownie.")
+                                        "expired_token", "token_expired" -> {
+                                            deviceCode = ""
+                                            userCode = ""
+                                            throw IllegalStateException("Kod wygasł. Rozpocznij logowanie ponownie.")
+                                        }
                                         "" -> {
                                             val access = result.optString("access_token")
                                             val refresh = result.optString("refresh_token")
@@ -313,16 +319,23 @@ private fun ClipRushApp() {
                                             TokenVault.save(activity, access)
                                             if (refresh.isNotBlank()) TokenVault.saveRefresh(activity, refresh)
                                             token = access
-                                            connected = true
                                             taskLoad(access) { s, ss, c, cs ->
-                                                sources = s; sourcesSha = ss; config = c; configSha = cs
+                                                sources = s
+                                                sourcesSha = ss
+                                                config = c
+                                                configSha = cs
                                             }
+                                            connected = true
                                             authorized = true
                                         }
                                         else -> throw IllegalStateException(result.optString("error_description", result.optString("error")))
                                     }
                                 }
-                                if (!authorized) throw IllegalStateException("Kod logowania wygasł. Spróbuj ponownie.")
+                                if (!authorized) {
+                                    deviceCode = ""
+                                    userCode = ""
+                                    throw IllegalStateException("Kod logowania wygasł. Rozpocznij logowanie ponownie.")
+                                }
                             }
                         }
                     }
