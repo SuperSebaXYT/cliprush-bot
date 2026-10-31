@@ -135,8 +135,8 @@ def fetch_guest_visitor_data() -> str | None:
 
     # YouTube currently exposes this value in its homepage ytcfg payload.
     patterns = (
-        r'"VISITOR_DATA"\\s*:\\s*"([^"]+)"',
-        r'"visitorData"\\s*:\\s*"([^"]+)"',
+        r'"VISITOR_DATA"\s*:\s*"([^"]+)"',
+        r'"visitorData"\s*:\s*"([^"]+)"',
     )
     for pattern in patterns:
         match = re.search(pattern, response.text)
