@@ -109,47 +109,6 @@ def run_command(
         )
 
 
-def fetch_guest_visitor_data() -> str | None:
-    """Fetch a public YouTube guest Visitor Data value without logging in."""
-    import requests
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    try:
-        response = requests.get(
-            "https://www.youtube.com/",
-            headers=headers,
-            timeout=20,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        print(f"Guest Visitor Data request failed: {exc}", flush=True)
-        return None
-
-    # YouTube currently exposes this value in its homepage ytcfg payload.
-    patterns = (
-        r'"VISITOR_DATA"\s*:\s*"([^"]+)"',
-        r'"visitorData"\s*:\s*"([^"]+)"',
-    )
-    for pattern in patterns:
-        match = re.search(pattern, response.text)
-        if match:
-            value = match.group(1)
-            if value and len(value) > 10:
-                print("Fetched a public YouTube guest Visitor Data value.", flush=True)
-                return value
-
-    print("YouTube homepage did not expose a Visitor Data value.", flush=True)
-    return None
-
-
 def download_source(
     source: dict,
     work_dir: Path,
@@ -165,71 +124,24 @@ def download_source(
                 config.get("live_capture_seconds", 480),
             )
         )
-
         command = [
-            "streamlink",
-            "--hls-duration",
-            str(duration),
-            source["url"],
-            "best",
-            "-o",
+            "streamlink", "--hls-duration", str(duration),
+            source["url"], "best", "-o",
             str(work_dir / f"{source_id}.mp4"),
         ]
-
         run_command(command, f"Capturing LIVE: {source['title']}")
-
         output = work_dir / f"{source_id}.mp4"
-
         if not output.exists() or output.stat().st_size == 0:
             raise RuntimeError("LIVE capture produced no video file.")
-
         return output
 
-    cookies_path = work_dir / "youtube_cookies.txt"
-    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    cookie_args = []
-
-    if cookies:
-        cookies_path.write_text(cookies, encoding="utf-8")
-        cookie_args = ["--cookies", str(cookies_path)]
-        print("Trying configured YOUTUBE_COOKIES first.", flush=True)
-    else:
-        print("No YOUTUBE_COOKIES configured; guest mode will be used.", flush=True)
-
-    # The public guest Visitor Data path is a fallback, not an account session.
-    # yt-dlp requires webpage/config requests to be skipped when overriding it.
-    visitor_data = fetch_guest_visitor_data()
-    download_modes = []
-
-    if cookie_args:
-        download_modes.append((
-            "configured cookies",
-            cookie_args,
-            ["--extractor-args", "youtube:player-client=mweb"],
-        ))
-
-    if visitor_data:
-        download_modes.append((
-            "guest Visitor Data (no cookies)",
-            [],
-            [
-                "--extractor-args",
-                "youtubetab:skip=webpage",
-                "--extractor-args",
-                (
-                    "youtube:player-client=mweb;"
-                    "player_skip=webpage,configs;"
-                    f"visitor_data={visitor_data}"
-                ),
-            ],
-        ))
-
-    if not download_modes:
-        raise RuntimeError(
-            "No YouTube authentication mode is available: cookies are empty "
-            "and guest Visitor Data could not be fetched."
-        )
-
+    # Do not depend on exported account cookies or manually supplied Visitor Data.
+    # Try YouTube clients with different authentication/PO-token requirements.
+    client_modes = [
+        ("android_vr (no PO token required)", "android_vr"),
+        ("tv_simply (no account cookies)", "tv_simply"),
+        ("mweb (automatic BgUtils PO token)", "mweb"),
+    ]
     format_selectors = [
         "best[ext=mp4]/best",
         "best",
@@ -237,89 +149,53 @@ def download_source(
     ]
     last_error = None
 
-    try:
-        for mode_name, mode_args, extractor_args in download_modes:
-            print(f"Starting YouTube download mode: {mode_name}", flush=True)
-
-            for selector in format_selectors:
-                print(
-                    f"Trying yt-dlp format selector: {selector}",
-                    flush=True,
-                )
-
-                command = [
-                    sys.executable,
-                    "-m",
-                    "yt_dlp",
-                    "--no-playlist",
-                    "--no-warnings",
-                    "--retries",
-                    "2",
-                    "--fragment-retries",
-                    "2",
-                    "--extractor-retries",
-                    "2",
-                    "--js-runtimes",
-                    "node",
-                ]
-                command.extend(extractor_args)
-                command.extend([
-                    "--format",
-                    selector,
-                    "--merge-output-format",
-                    "mp4",
-                    "-o",
-                    str(output_template),
-                ])
-                command.extend(mode_args)
-                command.append(source["url"])
-
-                try:
-                    run_command(
-                        command,
-                        f"Downloading VOD ({mode_name}): {source['title']}",
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    print(
-                        f"Download mode '{mode_name}' failed for "
-                        f"format '{selector}': {exc}",
-                        flush=True,
-                    )
-                    continue
-
-                candidates = [
-                    path
-                    for path in work_dir.glob(f"{source_id}.*")
-                    if path.suffix.lower() in {
-                        ".mp4",
-                        ".mkv",
-                        ".webm",
-                        ".mov",
-                    }
-                    and path.stat().st_size > 0
-                ]
-
-                if candidates:
-                    return max(
-                        candidates,
-                        key=lambda path: path.stat().st_size,
-                    )
-
-        raise RuntimeError(
-            "All YouTube download modes and format selectors failed. "
-            f"Last error: {last_error}"
-        )
-
-    finally:
-        if cookies_path.exists():
+    for mode_name, player_client in client_modes:
+        print(f"Starting YouTube download mode: {mode_name}", flush=True)
+        for selector in format_selectors:
+            print(
+                f"Trying yt-dlp format selector: {selector}",
+                flush=True,
+            )
+            command = [
+                sys.executable, "-m", "yt_dlp",
+                "--no-playlist",
+                "--retries", "3",
+                "--fragment-retries", "3",
+                "--extractor-retries", "3",
+                "--js-runtimes", "node",
+                "--extractor-args",
+                f"youtube:player_client={player_client}",
+                "--format", selector,
+                "--merge-output-format", "mp4",
+                "-o", str(output_template),
+                source["url"],
+            ]
             try:
-                cookies_path.unlink()
-            except OSError:
+                run_command(
+                    command,
+                    f"Downloading VOD ({mode_name}): {source['title']}",
+                )
+            except Exception as exc:
+                last_error = exc
                 print(
-                    "WARNING: Could not remove temporary cookies file.",
+                    f"Download mode '{mode_name}' failed for "
+                    f"format '{selector}': {exc}",
                     flush=True,
                 )
+                continue
+
+            candidates = [
+                path for path in work_dir.glob(f"{source_id}.*")
+                if path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
+                and path.stat().st_size > 0
+            ]
+            if candidates:
+                return max(candidates, key=lambda path: path.stat().st_size)
+
+    raise RuntimeError(
+        "All cookie-free YouTube clients and format selectors failed. "
+        f"Last error: {last_error}"
+    )
 
 
 def transcribe_video(
