@@ -17,9 +17,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        webView = WebView(this)
         CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(createWebView(), true)
-        webView = webViewOrCreate
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.databaseEnabled = true
@@ -38,11 +38,6 @@ class MainActivity : Activity() {
         if (savedInstanceState == null) webView.loadUrl(appUrl)
         else webView.restoreState(savedInstanceState)
     }
-
-    private val webViewOrCreate: WebView
-        get() = WebView(this)
-
-    private fun createWebView(): WebView = WebView(this)
 
     override fun onSaveInstanceState(outState: Bundle) {
         webView.saveState(outState)
