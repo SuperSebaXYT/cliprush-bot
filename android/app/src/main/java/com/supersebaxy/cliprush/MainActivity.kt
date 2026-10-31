@@ -51,9 +51,14 @@ class MainActivity : Activity() {
                     return request.url.scheme != "https" && request.url.scheme != "http"
                 }
 
+                override fun onPageCommitVisible(view: WebView, url: String) {
+                    super.onPageCommitVisible(view, url)
+                    handler.postDelayed({ hideSplash() }, 700)
+                }
+
                 override fun onPageFinished(view: WebView, url: String) {
                     super.onPageFinished(view, url)
-                    checkAppReady()
+                    handler.postDelayed({ hideSplash() }, 1200)
                 }
             }
         }
@@ -70,11 +75,12 @@ class MainActivity : Activity() {
         setContentView(root)
 
         splashStartedAt = System.currentTimeMillis()
+
+        // Never leave the branded splash covering the app indefinitely.
+        handler.postDelayed({ hideSplash() }, 8000)
+
         if (savedInstanceState == null) webView.loadUrl(appUrl)
-        else {
-            webView.restoreState(savedInstanceState)
-            checkAppReady()
-        }
+        else webView.restoreState(savedInstanceState)
     }
 
     private fun createSplash(): View {
