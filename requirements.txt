@@ -1,5 +1,5 @@
 faster-whisper>=1.1.0
-yt-dlp[default]>=2025.1.15
+yt-dlp[default]
 google-api-python-client>=2.150.0
 google-auth>=2.35.0
 google-auth-oauthlib>=1.2.1
