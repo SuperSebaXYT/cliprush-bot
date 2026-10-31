@@ -35,6 +35,17 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Start automatic YouTube PO token provider
+        run: |
+          docker run -d --name bgutil-provider --network host brainicism/bgutil-ytdlp-pot-provider:latest
+          for i in {1..30}; do
+            if curl --silent --fail http://127.0.0.1:4416/ >/dev/null; then
+              echo "BgUtils PO token provider is responding."
+              break
+            fi
+            sleep 2
+          done
+
       - name: Install FFmpeg
         run: |
           sudo apt-get update
