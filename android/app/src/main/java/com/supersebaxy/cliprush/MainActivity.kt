@@ -274,8 +274,10 @@ private fun ClipRushApp() {
                     Spacer(Modifier.height(16.dp))
                     ActionButton(if (userCode.isBlank()) "ZALOGUJ PRZEZ GITHUB" else "OTWÓRZ GITHUB I WPISZ KOD", busy) {
                         task {
+                            var pollingInterval = 5L
                             if (deviceCode.isBlank()) {
                                 val auth = withContext(Dispatchers.IO) { requestDeviceCode() }
+                                pollingInterval = auth.optLong("interval", 5L).coerceAtLeast(5L)
                                 deviceCode = auth.getString("device_code")
                                 userCode = auth.getString("user_code")
                                 verificationUri = auth.optString("verification_uri", "https://github.com/login/device")
@@ -284,7 +286,7 @@ private fun ClipRushApp() {
                                 uriHandler.openUri(verificationUri)
                             }
                             if (deviceCode.isNotBlank()) {
-                                var interval = 5L
+                                var interval = pollingInterval
                                 val expiresAt = System.currentTimeMillis() + 15L * 60L * 1000L
                                 var authorized = false
                                 while (System.currentTimeMillis() < expiresAt && !authorized) {
