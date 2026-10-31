@@ -1,11 +1,11 @@
 {
-  "clips_per_source": 2,
+  "clips_per_source": 1,
   "clip_duration_seconds": 35,
   "min_clip_seconds": 20,
   "max_clip_seconds": 35,
   "language": "en",
   "whisper_model": "small",
-  "max_sources_per_run": 2,
+  "max_sources_per_run": 1,
   "publish": true,
   "privacy_status": "private",
   "category_id": "20",
