@@ -133,9 +133,32 @@ private fun ClipRushApp() {
     val activity = androidx.compose.ui.platform.LocalContext.current as ComponentActivity
     val scope = rememberCoroutineScope()
     var token by remember { mutableStateOf(TokenVault.read(activity)) }
-    var connected by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
+    var connected by remember { mutableStateOf(token.isNotBlank()) }
+    var busy by remember { mutableStateOf(token.isNotBlank()) }
     var message by remember { mutableStateOf("") }
+
+    // Automatyczne logowanie zapisanym tokenem po każdym uruchomieniu aplikacji.
+    // Nie usuwamy tokena, jeśli GitHub chwilowo nie odpowiada lub token wygasł.
+    LaunchedEffect(Unit) {
+        if (token.isNotBlank()) {
+            try {
+                withContext(Dispatchers.IO) {
+                    api(token.trim(), "GET", "contents/config.json?ref=$BRANCH")
+                }
+                taskLoad(token.trim()) { s, ss, c, cs ->
+                    sources = s
+                    sourcesSha = ss
+                    config = c
+                    configSha = cs
+                }
+            } catch (e: Exception) {
+                connected = false
+                message = "Nie udało się zalogować automatycznie: ${e.message ?: "sprawdź token i połączenie"}"
+            } finally {
+                busy = false
+            }
+        }
+    }
     var tab by remember { mutableStateOf(0) }
     var sources by remember { mutableStateOf("") }
     var config by remember { mutableStateOf(JSONObject()) }
