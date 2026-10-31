@@ -1,8 +1,8 @@
 {
   "clips_per_source": 1,
   "clip_duration_seconds": 35,
-  "min_clip_seconds": 20,
-  "max_clip_seconds": 35,
+  "min_clip_seconds": 12,
+  "max_clip_seconds": 75,
   "language": "en",
   "whisper_model": "small",
   "max_sources_per_run": 1,
