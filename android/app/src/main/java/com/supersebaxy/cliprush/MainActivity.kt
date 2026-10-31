@@ -272,9 +272,17 @@ private suspend fun taskLoad(token: String, apply: (String, String?, JSONObject,
 private data class Quad(val a: String, val b: String?, val c: JSONObject, val d: String?)
 
 @Composable private fun BrandHeader() {
-    Text("CLIPRUSH", fontSize = 34.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp,
-        color = white)
-    Text("YOUR CLIPS. READY TO RUSH.", fontSize = 10.sp, letterSpacing = 2.sp, color = cyan)
+    Column(Modifier.fillMaxWidth().padding(top = 2.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("CLIP", fontSize = 34.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp, color = white)
+            Text("RUSH", fontSize = 34.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp, color = white)
+        }
+        Text("YOUR CLIPS. READY TO RUSH.", fontSize = 10.sp, letterSpacing = 2.sp, color = cyan)
+    }
 }
 @Composable private fun Panel(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(20.dp)).padding(17.dp)) {
