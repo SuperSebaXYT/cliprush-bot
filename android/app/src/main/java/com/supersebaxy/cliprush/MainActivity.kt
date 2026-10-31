@@ -1,6 +1,8 @@
 package com.supersebaxy.cliprush
 
 import android.os.Bundle
+import android.content.Intent
+import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -24,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -38,6 +41,7 @@ import javax.crypto.spec.GCMParameterSpec
 private const val REPO = "SuperSebaXYT/cliprush-bot"
 private const val BRANCH = "main"
 private const val PREFS = "cliprush_secure"
+private const val GITHUB_CLIENT_ID = "Ov23liXBoY5Sg5Jooyrh"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,8 +81,27 @@ private object TokenVault {
             }
         } catch (_: Exception) { "" }
     }
+    fun saveRefresh(activity: ComponentActivity, refresh: String) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key())
+        val encrypted = cipher.doFinal(refresh.toByteArray(Charsets.UTF_8))
+        val packed = cipher.iv + encrypted
+        activity.getSharedPreferences(PREFS, 0).edit()
+            .putString("refresh_token", Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
+    }
+    fun readRefresh(activity: ComponentActivity): String {
+        return try {
+            val packed = Base64.decode(activity.getSharedPreferences(PREFS, 0).getString("refresh_token", "") ?: "", Base64.NO_WRAP)
+            val iv = packed.copyOfRange(0, 12)
+            val data = packed.copyOfRange(12, packed.size)
+            Cipher.getInstance("AES/GCM/NoPadding").run {
+                init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv))
+                String(doFinal(data), Charsets.UTF_8)
+            }
+        } catch (_: Exception) { "" }
+    }
     fun clear(activity: ComponentActivity) {
-        activity.getSharedPreferences(PREFS, 0).edit().remove("token").apply()
+        activity.getSharedPreferences(PREFS, 0).edit().remove("token").remove("refresh_token").apply()
     }
 }
 
@@ -102,6 +125,53 @@ private fun api(token: String, method: String, path: String, body: JSONObject? =
     if (status !in 200..299) throw IllegalStateException("GitHub API $status: ${response.take(220)}")
     return if (response.isBlank()) JSONObject() else JSONObject(response)
 }
+
+private fun oauthPost(fields: Map<String, String>): JSONObject {
+    val connection = (URL("https://github.com/login/oauth/access_token").openConnection() as HttpURLConnection)
+    connection.requestMethod = "POST"
+    connection.connectTimeout = 15000
+    connection.readTimeout = 20000
+    connection.doOutput = true
+    connection.setRequestProperty("Accept", "application/json")
+    connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+    val body = fields.entries.joinToString("&") {
+        java.net.URLEncoder.encode(it.key, "UTF-8") + "=" + java.net.URLEncoder.encode(it.value, "UTF-8")
+    }
+    connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+    val status = connection.responseCode
+    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+    val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+    connection.disconnect()
+    if (status !in 200..299) throw IllegalStateException("GitHub OAuth HTTP $status: ${response.take(180)}")
+    return JSONObject(response)
+}
+
+private fun requestDeviceCode(): JSONObject {
+    val connection = (URL("https://github.com/login/device/code").openConnection() as HttpURLConnection)
+    connection.requestMethod = "POST"
+    connection.connectTimeout = 15000
+    connection.readTimeout = 20000
+    connection.doOutput = true
+    connection.setRequestProperty("Accept", "application/json")
+    connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+    val body = "client_id=" + java.net.URLEncoder.encode(GITHUB_CLIENT_ID, "UTF-8") +
+        "&scope=" + java.net.URLEncoder.encode("repo", "UTF-8")
+    connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+    val status = connection.responseCode
+    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+    val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+    connection.disconnect()
+    if (status !in 200..299) throw IllegalStateException("Nie udało się rozpocząć logowania: HTTP $status")
+    val json = JSONObject(response)
+    if (json.has("error")) throw IllegalStateException(json.optString("error_description", json.optString("error")))
+    return json
+}
+
+private fun refreshOAuthToken(refresh: String): JSONObject = oauthPost(mapOf(
+    "client_id" to GITHUB_CLIENT_ID,
+    "grant_type" to "refresh_token",
+    "refresh_token" to refresh
+))
 
 private fun readRepoFile(token: String, path: String): Pair<String, String?> {
     return try {
@@ -136,6 +206,10 @@ private fun ClipRushApp() {
     var connected by remember { mutableStateOf(token.isNotBlank()) }
     var busy by remember { mutableStateOf(token.isNotBlank()) }
     var message by remember { mutableStateOf("") }
+    var deviceCode by remember { mutableStateOf("") }
+    var userCode by remember { mutableStateOf("") }
+    var verificationUri by remember { mutableStateOf("https://github.com/login/device") }
+    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
 
     var tab by remember { mutableStateOf(0) }
     var sources by remember { mutableStateOf("") }
@@ -149,6 +223,16 @@ private fun ClipRushApp() {
     LaunchedEffect(Unit) {
         if (token.isNotBlank()) {
             try {
+                val savedRefresh = TokenVault.readRefresh(activity)
+                if (savedRefresh.isNotBlank()) {
+                    val refreshed = withContext(Dispatchers.IO) { refreshOAuthToken(savedRefresh) }
+                    val newAccess = refreshed.optString("access_token")
+                    val newRefresh = refreshed.optString("refresh_token")
+                    if (newAccess.isBlank() || newRefresh.isBlank()) throw IllegalStateException("GitHub nie zwrócił nowego tokena.")
+                    token = newAccess
+                    TokenVault.save(activity, newAccess)
+                    TokenVault.saveRefresh(activity, newRefresh)
+                }
                 withContext(Dispatchers.IO) {
                     api(token.trim(), "GET", "contents/config.json?ref=$BRANCH")
                 }
@@ -160,7 +244,7 @@ private fun ClipRushApp() {
                 }
             } catch (e: Exception) {
                 connected = false
-                message = "Nie udało się zalogować automatycznie: ${e.message ?: "sprawdź token i połączenie"}"
+                message = "Automatyczne logowanie nie powiodło się: ${e.message ?: "zaloguj się ponownie"}"
             } finally {
                 busy = false
             }
@@ -186,26 +270,67 @@ private fun ClipRushApp() {
                     BrandHeader()
                     Spacer(Modifier.height(28.dp))
                     Text("Połącz GitHub", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = white)
-                    Text("Token jest szyfrowany lokalnie na tym urządzeniu.", color = Color.LightGray, fontSize = 13.sp)
+                    Text("Bez wklejania PAT. Zaloguj się bezpiecznie przez kod urządzenia GitHub.", color = Color.LightGray, fontSize = 13.sp)
                     Spacer(Modifier.height(16.dp))
-                    OutlinedTextField(token, { token = it }, label = { Text("GitHub Personal Access Token") },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-                    Spacer(Modifier.height(12.dp))
-                    ActionButton("POŁĄCZ Z REPOZYTORIUM", busy) {
+                    ActionButton(if (userCode.isBlank()) "ZALOGUJ PRZEZ GITHUB" else "OTWÓRZ GITHUB I WPISZ KOD", busy) {
                         task {
-                            withContext(Dispatchers.IO) {
-                                api(token.trim(), "GET", "contents/config.json?ref=$BRANCH")
+                            if (deviceCode.isBlank()) {
+                                val auth = withContext(Dispatchers.IO) { requestDeviceCode() }
+                                deviceCode = auth.getString("device_code")
+                                userCode = auth.getString("user_code")
+                                verificationUri = auth.optString("verification_uri", "https://github.com/login/device")
+                                uriHandler.openUri(verificationUri)
+                            } else {
+                                uriHandler.openUri(verificationUri)
                             }
-                            TokenVault.save(activity, token.trim())
-                            connected = true
-                            taskLoad(token.trim(), { s, ss, c, cs ->
-                                sources = s; sourcesSha = ss; config = c; configSha = cs
-                            })
+                            if (deviceCode.isNotBlank()) {
+                                var interval = 5L
+                                val expiresAt = System.currentTimeMillis() + 15L * 60L * 1000L
+                                var authorized = false
+                                while (System.currentTimeMillis() < expiresAt && !authorized) {
+                                    delay(interval * 1000L)
+                                    val result = withContext(Dispatchers.IO) {
+                                        oauthPost(mapOf(
+                                            "client_id" to GITHUB_CLIENT_ID,
+                                            "device_code" to deviceCode,
+                                            "grant_type" to "urn:ietf:params:oauth:grant-type:device_code"
+                                        ))
+                                    }
+                                    when (result.optString("error")) {
+                                        "authorization_pending" -> Unit
+                                        "slow_down" -> interval += 5L
+                                        "access_denied" -> throw IllegalStateException("Logowanie zostało anulowane na GitHubie.")
+                                        "expired_token", "token_expired" -> throw IllegalStateException("Kod wygasł. Rozpocznij logowanie ponownie.")
+                                        "" -> {
+                                            val access = result.optString("access_token")
+                                            val refresh = result.optString("refresh_token")
+                                            if (access.isBlank()) throw IllegalStateException("GitHub nie zwrócił tokena.")
+                                            withContext(Dispatchers.IO) {
+                                                api(access, "GET", "contents/config.json?ref=$BRANCH")
+                                            }
+                                            TokenVault.save(activity, access)
+                                            if (refresh.isNotBlank()) TokenVault.saveRefresh(activity, refresh)
+                                            token = access
+                                            connected = true
+                                            taskLoad(access) { s, ss, c, cs ->
+                                                sources = s; sourcesSha = ss; config = c; configSha = cs
+                                            }
+                                            authorized = true
+                                        }
+                                        else -> throw IllegalStateException(result.optString("error_description", result.optString("error")))
+                                    }
+                                }
+                                if (!authorized) throw IllegalStateException("Kod logowania wygasł. Spróbuj ponownie.")
+                            }
                         }
                     }
-                    Text("Wymagane uprawnienia tokena: Contents (Read and write), Actions (Read and write).", color = Color.Gray, fontSize = 11.sp)
+                    if (userCode.isNotBlank()) {
+                        Spacer(Modifier.height(14.dp))
+                        Text("TWÓJ KOD GITHUB", color = cyan, fontSize = 11.sp, letterSpacing = 2.sp)
+                        Text(userCode, color = white, fontSize = 30.sp, fontWeight = FontWeight.Black)
+                        Text("Jeśli przeglądarka się nie otworzyła, wejdź na github.com/login/device.", color = Color.LightGray, fontSize = 12.sp)
+                    }
+                    Text("Dostęp do repozytorium zostanie przyznany dopiero po zatwierdzeniu na GitHubie.", color = Color.Gray, fontSize = 11.sp)
                 }
             } else {
                 Column(Modifier.fillMaxSize()) {
@@ -218,7 +343,7 @@ private fun ClipRushApp() {
                             FilterChip(selected = tab == i, onClick = { tab = i }, label = { Text(label) })
                         }
                         Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { TokenVault.clear(activity); token = ""; connected = false }) { Text("WYLOGUJ") }
+                        TextButton(onClick = { TokenVault.clear(activity); token = ""; connected = false; deviceCode = ""; userCode = "" }) { Text("WYLOGUJ") }
                     }
                     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = cyan)
                     LazyColumn(Modifier.weight(1f).padding(horizontal = 18.dp), contentPadding = PaddingValues(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
