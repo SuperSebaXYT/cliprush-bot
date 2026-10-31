@@ -1,9 +1,9 @@
+
 from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,7 +85,10 @@ def get_sources(config: dict) -> list[dict]:
     return sources
 
 
-def run_command(command: list[str], description: str) -> None:
+def run_command(
+    command: list[str],
+    description: str,
+) -> None:
     print(f"\n{description}", flush=True)
     print("COMMAND:", " ".join(command), flush=True)
 
@@ -141,30 +144,14 @@ def download_source(
 
         return output
 
-    command = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
-        "--no-playlist",
-        "--no-warnings",
-        "--retries",
-        "3",
-        "--fragment-retries",
-        "3",
-        "-f",
-        "bv*+ba/b",
-        "--merge-output-format",
-        "mp4",
-        "-o",
-        str(output_template),
-    ]
-
+    cookies_path = work_dir / "youtube_cookies.txt"
     cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
 
+    cookie_args = []
+
     if cookies:
-        cookies_path = work_dir / "youtube_cookies.txt"
         cookies_path.write_text(cookies, encoding="utf-8")
-        command.extend(["--cookies", str(cookies_path)])
+        cookie_args = ["--cookies", str(cookies_path)]
         print("Using YOUTUBE_COOKIES for yt-dlp.", flush=True)
     else:
         print(
@@ -173,26 +160,91 @@ def download_source(
             flush=True,
         )
 
-    command.append(source["url"])
-
-    run_command(command, f"Downloading VOD: {source['title']}")
-
-    candidates = list(work_dir.glob(f"{source_id}.*"))
-
-    candidates = [
-        path for path in candidates
-        if path.suffix.lower() in {
-            ".mp4", ".mkv", ".webm", ".mov"
-        }
-        and path.stat().st_size > 0
+    # Najpierw próbujemy pojedynczego formatu.
+    # Potem standardowego połączenia obrazu i dźwięku.
+    format_selectors = [
+        "best[ext=mp4]/best",
+        "best",
+        "bv*+ba/b",
     ]
 
-    if not candidates:
+    last_error = None
+
+    try:
+        for selector in format_selectors:
+            print(
+                f"Trying yt-dlp format selector: {selector}",
+                flush=True,
+            )
+
+            command = [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "--no-playlist",
+                "--no-warnings",
+                "--retries",
+                "3",
+                "--fragment-retries",
+                "3",
+                "--extractor-retries",
+                "3",
+                "--format",
+                selector,
+                "--merge-output-format",
+                "mp4",
+                "-o",
+                str(output_template),
+            ]
+
+            command.extend(cookie_args)
+            command.append(source["url"])
+
+            try:
+                run_command(
+                    command,
+                    f"Downloading VOD: {source['title']}",
+                )
+            except Exception as exc:
+                last_error = exc
+                print(
+                    f"Format selector failed: {selector}. "
+                    f"Trying next option.",
+                    flush=True,
+                )
+                continue
+
+            candidates = [
+                path
+                for path in work_dir.glob(f"{source_id}.*")
+                if path.suffix.lower() in {
+                    ".mp4",
+                    ".mkv",
+                    ".webm",
+                    ".mov",
+                }
+                and path.stat().st_size > 0
+            ]
+
+            if candidates:
+                return max(
+                    candidates,
+                    key=lambda path: path.stat().st_size,
+                )
+
         raise RuntimeError(
-            f"yt-dlp finished but no video file was found for {source_id}"
+            f"All yt-dlp format selectors failed. Last error: {last_error}"
         )
 
-    return max(candidates, key=lambda path: path.stat().st_size)
+    finally:
+        if cookies_path.exists():
+            try:
+                cookies_path.unlink()
+            except OSError:
+                print(
+                    "WARNING: Could not remove temporary cookies file.",
+                    flush=True,
+                )
 
 
 def transcribe_video(
@@ -248,7 +300,6 @@ def transcribe_video(
 
 def score_segment(segment: dict) -> float:
     text = segment["text"].lower()
-
     score = 0.0
 
     hooks = [
@@ -583,8 +634,6 @@ def main() -> None:
                 work_dir,
                 config,
             )
-
-            import subprocess
 
             probe = subprocess.run(
                 [
