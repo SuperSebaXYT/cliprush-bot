@@ -374,11 +374,11 @@ def score_segment(segment: dict) -> float:
     return score
 
 
-def score_with_gemini(candidates: list[dict]) -> list[dict]:
-    """Rank transcript windows for comedy using Gemini when an API key exists."""
+def score_with_gemini(candidates: list[dict], config: dict) -> list[dict]:
+    """Find complete funny moments and let Gemini choose their exact boundaries."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key or not candidates:
-        print("Gemini humor ranking unavailable; using transcript fallback.", flush=True)
+        print("Gemini boundary selection unavailable; using automatic transcript fallback.", flush=True)
         return candidates
 
     import requests
@@ -389,18 +389,29 @@ def score_with_gemini(candidates: list[dict]) -> list[dict]:
         f"{model}:generateContent"
     )
     compact = [
-        {"id": i, "transcript": item["context"][:1800]}
+        {
+            "id": i,
+            "window_start": round(item["start"], 2),
+            "window_end": round(item["end"], 2),
+            "transcript": item["context"][:5000],
+        }
         for i, item in enumerate(candidates)
     ]
     prompt = (
-        "You are ranking short streamer VOD moments for genuinely funny YouTube Shorts. "
-        "Score each transcript from 0 to 10 for comedy potential. Reward an actual joke, "
-        "unexpected absurdity, funny argument, sharp punchline, embarrassing mishap, "
-        "or a strong comedic reaction. Do NOT reward generic hype words, ordinary "
-        "conversation, greetings, repeated profanity, or a question by itself. "
-        "Prefer a complete setup-payoff moment with enough context. "
-        "Return ONLY valid JSON: {\"scores\":[{\"id\":0,\"score\":0,\"reason\":\"short reason\"}]}. "
-        "Score these candidates:\n" + json.dumps(compact, ensure_ascii=False)
+        "You are an expert comedy editor for streamer YouTube Shorts. "
+        "For each candidate transcript, decide whether it contains a genuinely funny "
+        "complete moment. Find the WHOLE moment: include enough setup before the joke "
+        "and the reaction/payoff after it. Do not cut in the middle of a sentence, "
+        "joke, argument, or reaction. Do not choose ordinary conversation or hype "
+        "without a funny event. Choose precise absolute start and end timestamps in "
+        "seconds using the timestamps attached to each transcript line. "
+        "The clip may be any length from 12 to 75 seconds; choose the natural length, "
+        "not a fixed duration. Score comedy from 0 to 10. If no real funny moment "
+        "exists, score below 5.5. Return ONLY JSON in this schema: "
+        "{\"moments\":[{\"id\":0,\"score\":8.5,\"start\":123.4,"
+        "\"end\":158.2,\"reason\":\"short explanation\"}]}. "
+        "Only return moments with score at least 5.5. "
+        "Candidates:\n" + json.dumps(compact, ensure_ascii=False)
     )
 
     try:
@@ -414,30 +425,50 @@ def score_with_gemini(candidates: list[dict]) -> list[dict]:
                     "responseMimeType": "application/json",
                 },
             },
-            timeout=45,
+            timeout=60,
         )
         response.raise_for_status()
-        body = response.json()
-        raw = body["candidates"][0]["content"]["parts"][0]["text"]
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
         parsed = json.loads(raw)
-        scores = {
-            int(item["id"]): item
-            for item in parsed.get("scores", [])
-            if "id" in item and "score" in item
-        }
-        for i, candidate in enumerate(candidates):
-            result = scores.get(i)
-            if result:
-                candidate["score"] = float(result["score"])
-                candidate["reason"] = str(result.get("reason", ""))[:180]
+        ranked = []
+
+        for result in parsed.get("moments", []):
+            idx = int(result["id"])
+            if idx < 0 or idx >= len(candidates):
+                continue
+            original = candidates[idx]
+            score = float(result["score"])
+            start_time = float(result["start"])
+            end_time = float(result["end"])
+
+            # Model boundaries must stay inside the analyzed window.
+            start_time = max(original["start"], start_time)
+            end_time = min(original["end"], end_time)
+            duration = end_time - start_time
+            if score < 5.5 or duration < 12 or duration > 75:
+                continue
+
+            ranked.append({
+                "start": start_time,
+                "end": end_time,
+                "score": score,
+                "text": original["text"],
+                "reason": str(result.get("reason", ""))[:180],
+            })
+
         print(
-            f"Gemini humor ranking scored {len(scores)}/{len(candidates)} candidates.",
+            f"Gemini found {len(ranked)} complete funny moment(s) "
+            f"from {len(candidates)} analyzed windows.",
             flush=True,
         )
+        return ranked
     except Exception as exc:
-        print(f"WARNING: Gemini humor ranking failed: {exc}; using fallback scores.", flush=True)
-
-    return candidates
+        print(
+            f"WARNING: Gemini moment detection failed: {exc}; "
+            "using automatic transcript fallback.",
+            flush=True,
+        )
+        return candidates
 
 
 def select_clips(
@@ -446,58 +477,80 @@ def select_clips(
     video_duration: float,
 ) -> list[dict]:
     clips_per_source = max(1, int(config.get("clips_per_source", 1)))
-    target_duration = int(config.get("clip_duration_seconds", 35))
-    min_duration = int(config.get("min_clip_seconds", 20))
-    max_duration = int(config.get("max_clip_seconds", 55))
+    min_duration = int(config.get("min_clip_seconds", 12))
+    max_duration = int(config.get("max_clip_seconds", 75))
+    window_duration = 90
+    window_step = 45
 
+    if not segments:
+        return []
+
+    # Analyze overlapping 90-second transcript windows. The AI chooses
+    # the actual in/out points, so clips are not forced to a fixed length.
     candidates = []
-    for segment in segments:
-        center = (segment["start"] + segment["end"]) / 2
-        start = max(0, center - target_duration / 2)
-        end = min(video_duration, start + target_duration)
+    window_start = 0.0
+    while window_start < video_duration:
+        window_end = min(video_duration, window_start + window_duration)
+        window_segments = [
+            item for item in segments
+            if item["end"] > window_start and item["start"] < window_end
+        ]
+        if window_segments:
+            transcript = "\n".join(
+                f"[{item['start']:.2f}-{item['end']:.2f}] {item['text']}"
+                for item in window_segments
+            )
+            candidates.append({
+                "start": window_start,
+                "end": window_end,
+                "score": max(score_segment(item) for item in window_segments),
+                "text": window_segments[len(window_segments) // 2]["text"],
+                "context": transcript,
+            })
+        window_start += window_step
 
-        if end - start < min_duration:
-            continue
-        if end - start > max_duration:
-            end = start + max_duration
-        if end > video_duration:
-            end = video_duration
-            start = max(0, end - target_duration)
-        if end - start < min_duration:
-            continue
-
-        context = " ".join(
-            item["text"]
-            for item in segments
-            if item["end"] > start - 8 and item["start"] < end + 8
-        )
-        candidates.append({
-            "start": start,
-            "end": end,
-            "score": score_segment(segment),
-            "text": segment["text"],
-            "context": context,
-        })
-
-    # Remove near-duplicate candidate windows before calling the model.
+    # Keep a broad, non-duplicate shortlist for the semantic editor.
     candidates.sort(key=lambda item: item["score"], reverse=True)
     shortlist = []
     for item in candidates:
         if any(
-            abs(item["start"] - old["start"]) < target_duration * 0.55
+            abs(item["start"] - old["start"]) < window_step
             for old in shortlist
         ):
             continue
         shortlist.append(item)
-        if len(shortlist) >= 24:
+        if len(shortlist) >= 30:
             break
 
-    shortlist = score_with_gemini(shortlist)
-    shortlist.sort(key=lambda item: item["score"], reverse=True)
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        ranked = score_with_gemini(shortlist, config)
+    else:
+        print(
+            "GEMINI_API_KEY missing: automatic timing fallback is active, "
+            "but semantic full-moment detection is unavailable.",
+            flush=True,
+        )
+        ranked = []
+        for item in shortlist:
+            center = (item["start"] + item["end"]) / 2
+            start_time = max(0, center - 17.5)
+            end_time = min(video_duration, start_time + 35)
+            ranked.append({
+                "start": start_time,
+                "end": end_time,
+                "score": item["score"],
+                "text": item["text"],
+            })
+
+    ranked = [
+        item for item in ranked
+        if min_duration <= item["end"] - item["start"] <= max_duration
+    ]
+    ranked.sort(key=lambda item: item["score"], reverse=True)
 
     selected = []
     minimum_score = float(config.get("minimum_humor_score", 5.5))
-    for candidate in shortlist:
+    for candidate in ranked:
         if candidate["score"] < minimum_score:
             continue
         overlaps = any(
@@ -514,16 +567,18 @@ def select_clips(
             break
 
     for item in selected:
-        item.pop("context", None)
         if item.get("reason"):
             print(
-                f"Humor pick: {item['reason']} (score {item['score']:.1f}/10)",
+                f"Funny moment: {item['reason']} | "
+                f"{item['start']:.1f}s-{item['end']:.1f}s "
+                f"({item['end'] - item['start']:.1f}s) "
+                f"| score {item['score']:.1f}/10",
                 flush=True,
             )
 
     print(
-        f"Humor selector: {len(selected)} clip(s) passed "
-        f"minimum score {minimum_score:.1f}/10.",
+        f"Automatic moment selection: {len(selected)} clip(s), "
+        "variable duration.",
         flush=True,
     )
     return sorted(selected, key=lambda item: item["start"])
