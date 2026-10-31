@@ -191,6 +191,8 @@ def download_source(
                 "3",
                 "--js-runtimes",
                 "node",
+                "--extractor-args",
+                "youtube:player-client=mweb",
                 "--format",
                 selector,
                 "--merge-output-format",
@@ -226,6 +228,8 @@ def download_source(
                     "--list-formats",
                     "--js-runtimes",
                     "node",
+                    "--extractor-args",
+                    "youtube:player-client=mweb",
                 ]
                 diagnostic_command.extend(cookie_args)
                 diagnostic_command.append(source["url"])
