@@ -102,6 +102,26 @@ hr {
     opacity: .75;
     font-size: .9rem;
 }
+
+/* Ukryj elementy interfejsu Streamlit Cloud */
+header[data-testid="stHeader"],
+footer,
+#MainMenu,
+div[data-testid="stToolbar"],
+div[data-testid="stDecoration"],
+div[data-testid="stStatusWidget"],
+div[data-testid="stAppDeployButton"],
+div[data-testid="stHeaderActionElements"],
+div[data-testid="stUserAvatar"] {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+}
+
+/* Usuń pusty margines pozostawiony przez górny pasek */
+.stAppViewContainer .main .block-container {
+    padding-top: 1.1rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
