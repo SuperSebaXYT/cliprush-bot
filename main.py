@@ -135,13 +135,28 @@ def download_source(
             raise RuntimeError("LIVE capture produced no video file.")
         return output
 
-    # Do not depend on exported account cookies or manually supplied Visitor Data.
-    # Try YouTube clients with different authentication/PO-token requirements.
-    client_modes = [
-        ("android_vr (no PO token required)", "android_vr"),
-        ("tv_simply (no account cookies)", "tv_simply"),
-        ("mweb (automatic BgUtils PO token)", "mweb"),
-    ]
+    # Use the supplied YouTube session cookies first. GitHub Actions secrets
+    # are injected at runtime; never print or commit their contents.
+    cookie_text = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    cookie_file = work_dir / "youtube_cookies.txt"
+    cookie_args = []
+
+    if cookie_text:
+        cookie_file.write_text(cookie_text + "\\n", encoding="utf-8")
+        cookie_args = ["--cookies", str(cookie_file)]
+        print("YouTube cookies found; authenticated download will be tried first.", flush=True)
+    else:
+        print("YOUTUBE_COOKIES is empty; trying cookie-free clients.", flush=True)
+
+    # Try authenticated mweb first, then alternate clients as fallbacks.
+    client_modes = []
+    if cookie_args:
+        client_modes.append(("mweb with account cookies", "mweb", True))
+    client_modes.extend([
+        ("android_vr", "android_vr", False),
+        ("tv_simply", "tv_simply", False),
+        ("mweb without cookies", "mweb", False),
+    ])
     format_selectors = [
         "best[ext=mp4]/best",
         "best",
@@ -149,51 +164,63 @@ def download_source(
     ]
     last_error = None
 
-    for mode_name, player_client in client_modes:
-        print(f"Starting YouTube download mode: {mode_name}", flush=True)
-        for selector in format_selectors:
-            print(
-                f"Trying yt-dlp format selector: {selector}",
-                flush=True,
-            )
-            command = [
-                sys.executable, "-m", "yt_dlp",
-                "--no-playlist",
-                "--retries", "3",
-                "--fragment-retries", "3",
-                "--extractor-retries", "3",
-                "--js-runtimes", "node",
-                "--extractor-args",
-                f"youtube:player_client={player_client}",
-                "--format", selector,
-                "--merge-output-format", "mp4",
-                "-o", str(output_template),
-                source["url"],
-            ]
-            try:
-                run_command(
-                    command,
-                    f"Downloading VOD ({mode_name}): {source['title']}",
-                )
-            except Exception as exc:
-                last_error = exc
+    try:
+        for mode_name, player_client, use_cookies in client_modes:
+            print(f"Starting YouTube download mode: {mode_name}", flush=True)
+            for selector in format_selectors:
                 print(
-                    f"Download mode '{mode_name}' failed for "
-                    f"format '{selector}': {exc}",
+                    f"Trying yt-dlp format selector: {selector}",
                     flush=True,
                 )
-                continue
+                command = [
+                    sys.executable, "-m", "yt_dlp",
+                    "--no-playlist",
+                    "--retries", "3",
+                    "--fragment-retries", "3",
+                    "--extractor-retries", "3",
+                    "--js-runtimes", "node",
+                    "--extractor-args",
+                    f"youtube:player_client={player_client}",
+                ]
+                if use_cookies:
+                    command.extend(cookie_args)
+                command.extend([
+                    "--format", selector,
+                    "--merge-output-format", "mp4",
+                    "-o", str(output_template),
+                    source["url"],
+                ])
+                try:
+                    run_command(
+                        command,
+                        f"Downloading VOD ({mode_name}): {source['title']}",
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    print(
+                        f"Download mode '{mode_name}' failed for "
+                        f"format '{selector}': {exc}",
+                        flush=True,
+                    )
+                    continue
 
-            candidates = [
-                path for path in work_dir.glob(f"{source_id}.*")
-                if path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
-                and path.stat().st_size > 0
-            ]
-            if candidates:
-                return max(candidates, key=lambda path: path.stat().st_size)
+                candidates = [
+                    path for path in work_dir.glob(f"{source_id}.*")
+                    if path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
+                    and path.stat().st_size > 0
+                ]
+                if candidates:
+                    return max(candidates, key=lambda path: path.stat().st_size)
+    finally:
+        # The cookie file is temporary and must never survive the download attempt.
+        try:
+            cookie_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     raise RuntimeError(
-        "All cookie-free YouTube clients and format selectors failed. "
+        "All YouTube download modes failed. Check whether YOUTUBE_COOKIES "
+        "contains a current Netscape-format cookie export. "
         f"Last error: {last_error}"
     )
 
