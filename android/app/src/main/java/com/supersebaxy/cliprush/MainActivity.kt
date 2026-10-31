@@ -137,6 +137,13 @@ private fun ClipRushApp() {
     var busy by remember { mutableStateOf(token.isNotBlank()) }
     var message by remember { mutableStateOf("") }
 
+    var tab by remember { mutableStateOf(0) }
+    var sources by remember { mutableStateOf("") }
+    var config by remember { mutableStateOf(JSONObject()) }
+    var sourcesSha by remember { mutableStateOf<String?>(null) }
+    var configSha by remember { mutableStateOf<String?>(null) }
+    var runs by remember { mutableStateOf(listOf<String>()) }
+
     // Automatyczne logowanie zapisanym tokenem po każdym uruchomieniu aplikacji.
     // Nie usuwamy tokena, jeśli GitHub chwilowo nie odpowiada lub token wygasł.
     LaunchedEffect(Unit) {
@@ -159,12 +166,6 @@ private fun ClipRushApp() {
             }
         }
     }
-    var tab by remember { mutableStateOf(0) }
-    var sources by remember { mutableStateOf("") }
-    var config by remember { mutableStateOf(JSONObject()) }
-    var sourcesSha by remember { mutableStateOf<String?>(null) }
-    var configSha by remember { mutableStateOf<String?>(null) }
-    var runs by remember { mutableStateOf(listOf<String>()) }
 
     fun task(block: suspend () -> Unit) {
         scope.launch {
