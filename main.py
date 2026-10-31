@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -5,196 +7,658 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
 from faster_whisper import WhisperModel
-from source_discovery import discover_sources, _load_processed, save_processed
+from source_discovery import (
+    discover_sources,
+    _load_processed,
+    save_processed,
+)
 
 ROOT = Path(__file__).resolve().parent
 
-def run(cmd):
-    print("+", " ".join(map(str, cmd)), flush=True)
-    subprocess.run(list(map(str, cmd)), check=True)
 
-def load_config():
-    return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+def load_config() -> dict:
+    path = ROOT / "config.json"
+    if not path.exists():
+        raise FileNotFoundError("Nie znaleziono config.json")
 
-def get_manual_sources(limit):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def get_manual_sources(limit: int) -> list[dict]:
     path = ROOT / "sources.txt"
+
     if not path.exists():
         return []
-    return [x.strip() for x in path.read_text(encoding="utf-8").splitlines()
-            if x.strip() and not x.strip().startswith("#")][:limit]
+
+    results = []
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        url = line.strip()
+
+        if not url or url.startswith("#"):
+            continue
+
+        match = re.search(
+            r"(?:v=|youtu\.be/|/live/)([A-Za-z0-9_-]{11})",
+            url,
+        )
+
+        video_id = match.group(1) if match else url
+
+        results.append({
+            "id": video_id,
+            "url": url,
+            "title": video_id,
+            "is_live": False,
+        })
+
+        if len(results) >= limit:
+            break
+
+    return results
 
 
-def get_sources(cfg):
-    limit = int(cfg.get("max_sources_per_run", 2))
+def get_sources(config: dict) -> list[dict]:
+    limit = max(1, int(config.get("max_sources_per_run", 2)))
     sources = []
-    if cfg.get("auto_discovery_enabled", False):
-        sources.extend(discover_sources(cfg, limit=limit))
-    existing_urls = {item["url"] for item in sources}
-    if len(sources) < limit:
-        for url in get_manual_sources(limit):
-            if url not in existing_urls:
-                sources.append({"url": url, "is_live": False, "id": url})
-                existing_urls.add(url)
-            if len(sources) >= limit:
-                break
-    return sources[:limit]
 
-def download_source(source, work_dir, cfg):
-    url = source["url"]
-    template = work_dir / "source.%(ext)s"
+    if config.get("auto_discovery_enabled", True):
+        try:
+            sources = discover_sources(config, limit=limit)
+        except Exception as exc:
+            print(
+                f"ERROR: Automatic discovery failed: {exc}",
+                flush=True,
+            )
+
+    known_ids = {item["id"] for item in sources}
+
+    for item in get_manual_sources(limit):
+        if item["id"] not in known_ids and len(sources) < limit:
+            sources.append(item)
+            known_ids.add(item["id"])
+
+    print(f"Total sources selected: {len(sources)}", flush=True)
+
+    return sources
+
+
+def run_command(command: list[str], description: str) -> None:
+    print(f"\n{description}", flush=True)
+    print("COMMAND:", " ".join(command), flush=True)
+
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    if result.stdout:
+        print(result.stdout[-12000:], flush=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{description} failed with exit code {result.returncode}"
+        )
+
+
+def download_source(
+    source: dict,
+    work_dir: Path,
+    config: dict,
+) -> Path:
+    source_id = source["id"]
+    output_template = work_dir / f"{source_id}.%(ext)s"
+
     if source.get("is_live"):
-        # Record only a bounded live segment, rather than waiting for a broadcast that may run for hours.
-        duration = max(120, int(source.get("live_capture_seconds") or cfg.get("live_capture_seconds", 480)))
-        hh, rem = divmod(duration, 3600); mm, ss = divmod(rem, 60)
-        duration_arg = f"{hh:02d}:{mm:02d}:{ss:02d}"
-        run(["streamlink", "--hls-duration", duration_arg, url, "best", "-o", str(work_dir / "source.ts")])
+        duration = int(
+            source.get(
+                "live_capture_seconds",
+                config.get("live_capture_seconds", 480),
+            )
+        )
+
+        command = [
+            "streamlink",
+            "--hls-duration",
+            str(duration),
+            source["url"],
+            "best",
+            "-o",
+            str(work_dir / f"{source_id}.mp4"),
+        ]
+
+        run_command(command, f"Capturing LIVE: {source['title']}")
+
+        output = work_dir / f"{source_id}.mp4"
+
+        if not output.exists() or output.stat().st_size == 0:
+            raise RuntimeError("LIVE capture produced no video file.")
+
+        return output
+
+    command = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-playlist",
+        "--no-warnings",
+        "--retries",
+        "3",
+        "--fragment-retries",
+        "3",
+        "-f",
+        "bv*+ba/b",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        str(output_template),
+    ]
+
+    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+
+    if cookies:
+        cookies_path = work_dir / "youtube_cookies.txt"
+        cookies_path.write_text(cookies, encoding="utf-8")
+        command.extend(["--cookies", str(cookies_path)])
+        print("Using YOUTUBE_COOKIES for yt-dlp.", flush=True)
     else:
-        run([sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-             "-f", "bv*+ba/b", "--merge-output-format", "mp4", "-o", str(template), url])
-    candidates = [p for p in sorted(work_dir.glob("source.*"))
-                  if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".ts"} and p.stat().st_size > 0]
+        print(
+            "WARNING: YOUTUBE_COOKIES is not configured. "
+            "YouTube may block downloads.",
+            flush=True,
+        )
+
+    command.append(source["url"])
+
+    run_command(command, f"Downloading VOD: {source['title']}")
+
+    candidates = list(work_dir.glob(f"{source_id}.*"))
+
+    candidates = [
+        path for path in candidates
+        if path.suffix.lower() in {
+            ".mp4", ".mkv", ".webm", ".mov"
+        }
+        and path.stat().st_size > 0
+    ]
+
     if not candidates:
-        raise RuntimeError("No source video was found after download/recording.")
-    return candidates[0]
+        raise RuntimeError(
+            f"yt-dlp finished but no video file was found for {source_id}"
+        )
 
-def probe_duration(path):
-    out = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True).strip()
-    return float(out)
+    return max(candidates, key=lambda path: path.stat().st_size)
 
-def normalize_text(text):
-    return re.sub(r"\s+", " ", text.lower()).strip()
 
-def score_segment(text, avg_words):
-    t = normalize_text(text)
-    if len(t) < 35:
-        return -3
-    hooks = ["what", "no way", "oh my god", "insane", "crazy", "bro", "wait", "help", "finally",
-             "lets go", "let's go", "unbelievable", "holy", "wtf", "clutch", "win", "lost",
-             "nie", "co", "serio", "niemożliwe", "wygra", "przegra", "masakra"]
-    score = min(len(t) / 90, 2.0) + min(avg_words / 3.0, 2.0)
-    score += sum(1.25 for phrase in hooks if phrase in t)
-    score += 0.5 if "?" in text or "!" in text else 0
-    score -= 1.0 if len(t) > 550 else 0
+def transcribe_video(
+    video_path: Path,
+    config: dict,
+) -> list[dict]:
+    model_name = config.get("whisper_model", "small")
+
+    print(f"Loading Whisper model: {model_name}", flush=True)
+
+    model = WhisperModel(
+        model_name,
+        device="cpu",
+        compute_type="int8",
+    )
+
+    language = config.get("language", "en")
+
+    if language == "auto":
+        language = None
+
+    segments, info = model.transcribe(
+        str(video_path),
+        language=language,
+        vad_filter=True,
+        word_timestamps=True,
+    )
+
+    print(
+        f"Detected language: {info.language} "
+        f"({info.language_probability:.2f})",
+        flush=True,
+    )
+
+    result = []
+
+    for segment in segments:
+        text = segment.text.strip()
+
+        if not text:
+            continue
+
+        result.append({
+            "start": float(segment.start),
+            "end": float(segment.end),
+            "text": text,
+        })
+
+    print(f"Transcribed segments: {len(result)}", flush=True)
+
+    return result
+
+
+def score_segment(segment: dict) -> float:
+    text = segment["text"].lower()
+
+    score = 0.0
+
+    hooks = [
+        "what",
+        "why",
+        "how",
+        "no way",
+        "oh my god",
+        "wait",
+        "bro",
+        "crazy",
+        "insane",
+        "look",
+        "listen",
+        "impossible",
+        "actually",
+        "never",
+        "help",
+        "stop",
+    ]
+
+    for hook in hooks:
+        if hook in text:
+            score += 2.0
+
+    if "?" in text:
+        score += 1.5
+
+    if "!" in text:
+        score += 1.0
+
+    if len(text.split()) >= 8:
+        score += 1.0
+
+    if len(text.split()) <= 2:
+        score -= 1.0
+
     return score
 
-def transcribe(path, cfg):
-    model = WhisperModel(cfg.get("whisper_model", "small"), device="cpu", compute_type="int8")
-    language = cfg.get("language", "auto")
-    segments, info = model.transcribe(str(path), language=None if language == "auto" else language, vad_filter=True)
-    return list(segments), info
 
-def choose_windows(segments, duration, cfg):
-    target = int(cfg["clip_duration_seconds"])
-    min_len = int(cfg["min_clip_seconds"])
-    max_len = int(cfg["max_clip_seconds"])
-    step = max(5, target // 3)
+def select_clips(
+    segments: list[dict],
+    config: dict,
+    video_duration: float,
+) -> list[dict]:
+    clips_per_source = max(
+        1,
+        int(config.get("clips_per_source", 2)),
+    )
+
+    target_duration = int(
+        config.get("clip_duration_seconds", 35)
+    )
+
+    min_duration = int(
+        config.get("min_clip_seconds", 20)
+    )
+
+    max_duration = int(
+        config.get("max_clip_seconds", 55)
+    )
+
     windows = []
-    start = 0
-    while start + min_len < duration:
-        end = min(duration, start + target)
-        chosen = [s for s in segments if s.end > start and s.start < end]
-        text = " ".join(s.text.strip() for s in chosen).strip()
-        words = sum(len(s.text.split()) for s in chosen)
-        if end - start >= min_len and text:
-            windows.append({"start": start, "end": min(end, start + max_len),
-                            "text": text, "score": score_segment(text, words / max(end-start, 1))})
-        start += step
+
+    for segment in segments:
+        center = (segment["start"] + segment["end"]) / 2
+
+        start = max(0, center - target_duration / 2)
+        end = min(video_duration, start + target_duration)
+
+        if end - start < min_duration:
+            continue
+
+        if end - start > max_duration:
+            end = start + max_duration
+
+        if end > video_duration:
+            end = video_duration
+            start = max(0, end - target_duration)
+
+        if end - start < min_duration:
+            continue
+
+        windows.append({
+            "start": start,
+            "end": end,
+            "score": score_segment(segment),
+            "text": segment["text"],
+        })
+
+    windows.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
     selected = []
-    for item in sorted(windows, key=lambda x: x["score"], reverse=True):
-        if all(item["end"] <= old["start"] or item["start"] >= old["end"] for old in selected):
-            selected.append(item)
-        if len(selected) >= int(cfg["clips_per_source"]):
+
+    for candidate in windows:
+        overlaps = any(
+            not (
+                candidate["end"] <= existing["start"]
+                or candidate["start"] >= existing["end"]
+            )
+            for existing in selected
+        )
+
+        if overlaps:
+            continue
+
+        selected.append(candidate)
+
+        if len(selected) >= clips_per_source:
             break
-    return sorted(selected, key=lambda x: x["start"])
 
-def make_srt(text, out_path, duration):
-    words = text.split() or ["Highlight"]
-    chunks = [" ".join(words[i:i+6]) for i in range(0, len(words), 6)]
-    step = duration / max(len(chunks), 1)
-    def stamp(sec):
-        ms = int(max(0, sec) * 1000)
-        h, rem = divmod(ms, 3600000); m, rem = divmod(rem, 60000); s, ms = divmod(rem, 1000)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    selected.sort(key=lambda item: item["start"])
+
+    return selected
+
+
+def create_srt(
+    segments: list[dict],
+    clip_start: float,
+    clip_end: float,
+    output_path: Path,
+) -> None:
+    def timestamp(seconds: float) -> str:
+        milliseconds = int(seconds * 1000)
+
+        hours = milliseconds // 3600000
+        milliseconds %= 3600000
+
+        minutes = milliseconds // 60000
+        milliseconds %= 60000
+
+        secs = milliseconds // 1000
+        milliseconds %= 1000
+
+        return (
+            f"{hours:02}:{minutes:02}:{secs:02},"
+            f"{milliseconds:03}"
+        )
+
     lines = []
-    for i, chunk in enumerate(chunks):
-        lines += [str(i+1), f"{stamp(i*step)} --> {stamp(min(duration, (i+1)*step))}", chunk, ""]
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    index = 1
 
-def render_clip(source, item, dest):
-    start, end = float(item["start"]), float(item["end"])
-    duration = end - start
-    srt = dest.with_suffix(".srt")
-    make_srt(item["text"], srt, duration)
-    sub = str(srt.resolve()).replace("\\", "/").replace(":", r"\:")
-    vf = f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,subtitles='{sub}':force_style='FontName=Arial,FontSize=18,Outline=2,Shadow=1,Alignment=2,MarginV=170'"
-    run(["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(source), "-t", f"{duration:.2f}",
-         "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(dest)])
-    srt.unlink(missing_ok=True)
+    for segment in segments:
+        start = max(segment["start"], clip_start)
+        end = min(segment["end"], clip_end)
 
-def upload(path, cfg, index):
+        if end <= start:
+            continue
+
+        lines.extend([
+            str(index),
+            f"{timestamp(start - clip_start)} --> "
+            f"{timestamp(end - clip_start)}",
+            segment["text"],
+            "",
+        ])
+
+        index += 1
+
+    output_path.write_text(
+        "\n".join(lines),
+        encoding="utf-8",
+    )
+
+
+def render_clip(
+    video_path: Path,
+    clip: dict,
+    segments: list[dict],
+    output_path: Path,
+    config: dict,
+) -> None:
+    start = float(clip["start"])
+    duration = float(clip["end"] - clip["start"])
+
+    srt_path = output_path.with_suffix(".srt")
+
+    create_srt(
+        segments,
+        start,
+        float(clip["end"]),
+        srt_path,
+    )
+
+    subtitle_path = str(srt_path.resolve())
+    subtitle_path = subtitle_path.replace("\\", "/")
+    subtitle_path = subtitle_path.replace(":", "\\:")
+
+    video_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        f"subtitles='{subtitle_path}'"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(start),
+        "-i",
+        str(video_path),
+        "-t",
+        str(duration),
+        "-vf",
+        video_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    run_command(command, f"Rendering {output_path.name}")
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError("FFmpeg did not create the output clip.")
+
+
+def upload_to_youtube(
+    video_path: Path,
+    config: dict,
+) -> None:
+    if not config.get("publish", False):
+        print("Publishing disabled. Keeping clip as artifact.", flush=True)
+        return
+
+    token_json = os.environ.get("YOUTUBE_TOKEN_JSON", "").strip()
+
+    if not token_json:
+        raise RuntimeError(
+            "publish=true but YOUTUBE_TOKEN_JSON is missing."
+        )
+
     from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
-    raw = os.environ.get("YOUTUBE_TOKEN_JSON")
-    if not raw:
-        raise RuntimeError("publish=true but GitHub Secret YOUTUBE_TOKEN_JSON is missing.")
-    creds = Credentials.from_authorized_user_info(json.loads(raw), ["https://www.googleapis.com/auth/youtube.upload"])
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    service = build("youtube", "v3", credentials=creds, cache_discovery=False)
-    prefix = cfg.get("title_prefix", "ClipRush").strip()
-    title = f"{prefix} Highlight #{index} #Shorts".strip()[:100]
-    body = {"snippet": {"title": title, "description": cfg.get("description", "") + "\n\n#Shorts",
-             "tags": cfg.get("tags", ["shorts", "highlights"]), "categoryId": str(cfg.get("category_id", "20"))},
-            "status": {"privacyStatus": cfg.get("privacy_status", "private"), "selfDeclaredMadeForKids": False}}
-    response = service.videos().insert(part="snippet,status", body=body,
-        media_body=MediaFileUpload(str(path), mimetype="video/mp4", resumable=True)).execute()
-    print("Uploaded video ID:", response.get("id"), flush=True)
 
-def main():
-    cfg = load_config()
-    work_root = ROOT / cfg.get("work_dir", "work")
-    out_root = ROOT / cfg.get("output_dir", "output")
-    work_root.mkdir(exist_ok=True); out_root.mkdir(exist_ok=True)
-    sources = get_sources(cfg)
+    credentials = Credentials.from_authorized_user_info(
+        json.loads(token_json),
+        scopes=["https://www.googleapis.com/auth/youtube.upload"],
+    )
+
+    youtube = build(
+        "youtube",
+        "v3",
+        credentials=credentials,
+    )
+
+    title_prefix = config.get("title_prefix", "ClipRush")
+    title = f"{title_prefix} | {video_path.stem}"
+
+    description = config.get("description", "")
+    tags = config.get("tags", [])
+    privacy = config.get("privacy_status", "private")
+
+    body = {
+        "snippet": {
+            "title": title[:100],
+            "description": description,
+            "tags": tags,
+            "categoryId": str(config.get("category_id", "20")),
+        },
+        "status": {
+            "privacyStatus": privacy,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    media = MediaFileUpload(
+        str(video_path),
+        mimetype="video/mp4",
+        resumable=True,
+    )
+
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media,
+    )
+
+    response = request.execute()
+
+    print(
+        f"Uploaded to YouTube: {response.get('id')}",
+        flush=True,
+    )
+
+
+def main() -> None:
+    config = load_config()
+
+    output_dir = ROOT / config.get("output_dir", "output")
+    work_dir = ROOT / config.get("work_dir", "work")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    sources = get_sources(config)
+
     if not sources:
-        print("No eligible VODs discovered and no manual source URLs configured.")
+        print(
+            "No eligible sources discovered and no manual source URLs configured.",
+            flush=True,
+        )
         return
+
     processed = _load_processed()
-    index = 0
-    for source_i, source_info in enumerate(sources, 1):
-        url = source_info["url"]
-        work = work_root / f"source_{source_i}"
-        work.mkdir(parents=True, exist_ok=True)
+
+    for source in sources:
+        source_id = source["id"]
+
+        print(
+            f"\nProcessing {'LIVE' if source.get('is_live') else 'VOD'}: "
+            f"{source.get('title', source_id)}",
+            flush=True,
+        )
+
         try:
-            video = download_source(source_info, work, cfg)
-            duration = probe_duration(video)
-            segments, _ = transcribe(video, cfg)
-            for item in choose_windows(segments, duration, cfg):
-                index += 1
-                dest = out_root / f"clip_{source_i}_{index}.mp4"
-                render_clip(video, item, dest)
-                dest.with_suffix(".json").write_text(json.dumps({"source_url": url, **item},
-                    ensure_ascii=False, indent=2), encoding="utf-8")
-                print(f"Rendered {dest}; score={item['score']:.2f}", flush=True)
-                if cfg.get("publish", False):
-                    upload(dest, cfg, index)
-            # Mark the source only after the full source pipeline succeeds, preventing repeats.
-            video_id = str(source_info.get("id") or (url.split("v=", 1)[1].split("&", 1)[0] if "v=" in url else url.rstrip("/").split("/")[-1]))
-            # A live stream is revisited on the next scheduled run, so don't permanently mark it processed.
-            if not source_info.get("is_live"):
-                processed.add(video_id)
+            video_path = download_source(
+                source,
+                work_dir,
+                config,
+            )
+
+            import subprocess
+
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(video_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            video_duration = float(probe.stdout.strip())
+
+            segments = transcribe_video(
+                video_path,
+                config,
+            )
+
+            clips = select_clips(
+                segments,
+                config,
+                video_duration,
+            )
+
+            if not clips:
+                print(
+                    f"No suitable clips found for {source_id}.",
+                    flush=True,
+                )
+                continue
+
+            for index, clip in enumerate(clips, start=1):
+                output_path = output_dir / (
+                    f"{source_id}_clip_{index}.mp4"
+                )
+
+                render_clip(
+                    video_path,
+                    clip,
+                    segments,
+                    output_path,
+                    config,
+                )
+
+                upload_to_youtube(
+                    output_path,
+                    config,
+                )
+
+            if not source.get("is_live"):
+                processed.add(source_id)
                 save_processed(processed)
+
         except Exception as exc:
-            print(f"ERROR processing {url}: {exc}", file=sys.stderr, flush=True)
-            raise
+            print(
+                f"ERROR processing {source_id}: {exc}",
+                flush=True,
+            )
+
         finally:
-            shutil.rmtree(work, ignore_errors=True)
-    print("Pipeline complete.")
+            for path in work_dir.glob(f"{source_id}.*"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    print("\nClipping pipeline finished.", flush=True)
+
 
 if __name__ == "__main__":
     main()
