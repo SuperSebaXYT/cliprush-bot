@@ -18,25 +18,85 @@ BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 
 st.markdown("""
 <style>
+:root {
+    color-scheme: dark;
+}
+.stApp {
+    background:
+        radial-gradient(ellipse at 12% 5%, rgba(124, 35, 255, .22), transparent 38%),
+        radial-gradient(ellipse at 95% 28%, rgba(0, 205, 255, .13), transparent 34%),
+        linear-gradient(145deg, #080711 0%, #10091f 48%, #070b16 100%);
+    color: #F5F3FF;
+}
 .block-container {
     max-width: 760px;
     padding-top: 1.1rem;
     padding-bottom: 3rem;
 }
 h1 {
-    letter-spacing: -0.04em;
+    letter-spacing: -0.05em;
+    background: linear-gradient(90deg, #ffffff 10%, #c084fc 58%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+h2, h3, label, p, span {
+    color: #eee9ff;
+}
+div[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stExpander"],
+div[data-testid="stTabs"] [data-baseweb="tab-panel"] {
+    background: rgba(18, 13, 34, .72);
+    border-color: rgba(139, 92, 246, .22);
+    border-radius: 16px;
+}
+div[data-testid="stTextInput"] input,
+div[data-testid="stTextArea"] textarea,
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div {
+    background: #090815 !important;
+    color: #F5F3FF !important;
+    border: 1px solid #40305f !important;
+    border-radius: 11px !important;
+}
+div[data-testid="stTextArea"] textarea::placeholder,
+div[data-testid="stTextInput"] input::placeholder {
+    color: #827796 !important;
+}
+div[data-testid="stSlider"] [role="slider"] {
+    background: #a855f7;
 }
 div.stButton > button,
-div.stFormSubmitButton > button {
+div.stFormSubmitButton > button,
+div[data-testid="stLinkButton"] a {
     width: 100%;
     min-height: 3rem;
     border-radius: 12px;
     font-weight: 700;
+    border: 1px solid rgba(168, 85, 247, .55);
+    background: linear-gradient(105deg, #6d28d9, #7c3aed 55%, #0891b2);
+    color: white;
+}
+div.stButton > button:hover,
+div.stFormSubmitButton > button:hover {
+    border-color: #22d3ee;
+    color: white;
+    filter: brightness(1.12);
 }
 div[data-testid="stMetric"] {
-    background: #17172A;
+    background: linear-gradient(135deg, #17102b, #0d1828);
+    border: 1px solid rgba(139, 92, 246, .25);
     padding: 12px;
     border-radius: 12px;
+}
+div[data-testid="stMetricValue"] {
+    color: #c084fc;
+}
+div[data-testid="stTabs"] button[aria-selected="true"] {
+    color: #c084fc;
+    border-bottom-color: #a855f7;
+}
+hr {
+    border-color: rgba(139, 92, 246, .22);
 }
 .small-note {
     opacity: .75;
@@ -46,7 +106,7 @@ div[data-testid="stMetric"] {
 """, unsafe_allow_html=True)
 
 st.title("🎬 ClipRush Mobile")
-st.caption("Panel sterowania AI Clipping Botem")
+st.caption("Panel sterowania AI Clipping Botem · wersja 1.2")
 st.markdown("Zarządzaj źródłami, ustawieniami i uruchomieniami z telefonu.")
 
 if not TOKEN or not REPO or "/" not in REPO:
