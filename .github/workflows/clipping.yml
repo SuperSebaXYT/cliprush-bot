@@ -3,7 +3,8 @@ name: AI Clipping Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    # Three runs per day: 08:17, 14:17 and 20:17 UTC.
+    - cron: "17 8,14,20 * * *"
 
 permissions:
   contents: write
