@@ -374,20 +374,17 @@ def score_segment(segment: dict) -> float:
     return score
 
 
-def score_with_gemini(candidates: list[dict], config: dict) -> list[dict]:
-    """Find complete funny moments and let Gemini choose their exact boundaries."""
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+def score_with_groq(candidates: list[dict], config: dict) -> list[dict]:
+    """Use Groq chat completions to identify complete funny moments and boundaries."""
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key or not candidates:
-        print("Gemini boundary selection unavailable; using automatic transcript fallback.", flush=True)
+        print("Groq boundary selection unavailable; using transcript fallback.", flush=True)
         return candidates
 
     import requests
 
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent"
-    )
+    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+    endpoint = "https://api.groq.com/openai/v1/chat/completions"
     compact = [
         {
             "id": i,
@@ -407,28 +404,36 @@ def score_with_gemini(candidates: list[dict], config: dict) -> list[dict]:
         "seconds using the timestamps attached to each transcript line. "
         "The clip may be any length from 12 to 75 seconds; choose the natural length, "
         "not a fixed duration. Score comedy from 0 to 10. If no real funny moment "
-        "exists, score below 5.5. Return ONLY JSON in this schema: "
+        "exists, score below 5.5. Return ONLY valid JSON in this schema: "
         "{\"moments\":[{\"id\":0,\"score\":8.5,\"start\":123.4,"
         "\"end\":158.2,\"reason\":\"short explanation\"}]}. "
         "Only return moments with score at least 5.5. "
-        "Candidates:\n" + json.dumps(compact, ensure_ascii=False)
+        "Candidates:\\n" + json.dumps(compact, ensure_ascii=False)
     )
 
     try:
         response = requests.post(
             endpoint,
-            params={"key": api_key},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "responseMimeType": "application/json",
-                },
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
             },
-            timeout=60,
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You identify genuinely funny streamer moments. Return valid JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=90,
         )
         response.raise_for_status()
-        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        raw = response.json()["choices"][0]["message"]["content"]
         parsed = json.loads(raw)
         ranked = []
 
@@ -457,14 +462,14 @@ def score_with_gemini(candidates: list[dict], config: dict) -> list[dict]:
             })
 
         print(
-            f"Gemini found {len(ranked)} complete funny moment(s) "
-            f"from {len(candidates)} analyzed windows.",
+            f"Groq found {len(ranked)} complete funny moment(s) "
+            f"from {len(candidates)} analyzed windows using {model}.",
             flush=True,
         )
         return ranked
     except Exception as exc:
         print(
-            f"WARNING: Gemini moment detection failed: {exc}; "
+            f"WARNING: Groq moment detection failed: {exc}; "
             "using automatic transcript fallback.",
             flush=True,
         )
@@ -522,11 +527,11 @@ def select_clips(
         if len(shortlist) >= 30:
             break
 
-    if os.environ.get("GEMINI_API_KEY", "").strip():
-        ranked = score_with_gemini(shortlist, config)
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        ranked = score_with_groq(shortlist, config)
     else:
         print(
-            "GEMINI_API_KEY missing: automatic timing fallback is active, "
+            "GROQ_API_KEY missing: automatic timing fallback is active, "
             "but semantic full-moment detection is unavailable.",
             flush=True,
         )
