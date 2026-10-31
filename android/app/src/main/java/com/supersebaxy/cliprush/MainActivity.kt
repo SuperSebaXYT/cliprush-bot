@@ -46,10 +46,9 @@ class MainActivity : Activity() {
             webChromeClient = WebChromeClient()
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    val host = request.url.host ?: return false
-                    return !(host == "cliprush-bot.streamlit.app" ||
-                        host.endsWith(".streamlit.app") ||
-                        host == "accounts.google.com")
+                    // Keep HTTPS redirects and authentication flows inside the WebView.
+                    // Opening them externally can interrupt Streamlit's startup.
+                    return request.url.scheme != "https" && request.url.scheme != "http"
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
