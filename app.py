@@ -1,7 +1,5 @@
 import base64
 import json
-import os
-from datetime import datetime, timezone
 
 import requests
 import streamlit as st
@@ -20,11 +18,30 @@ BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 
 st.markdown("""
 <style>
-.block-container {max-width: 760px; padding-top: 1.1rem; padding-bottom: 3rem;}
-h1 {letter-spacing: -0.04em;}
-div.stButton > button {width:100%; min-height: 3rem; border-radius: 12px; font-weight: 700;}
-div[data-testid="stMetric"] {background:#17172A; padding:12px; border-radius:12px;}
-.small-note {opacity:.75; font-size:.9rem;}
+.block-container {
+    max-width: 760px;
+    padding-top: 1.1rem;
+    padding-bottom: 3rem;
+}
+h1 {
+    letter-spacing: -0.04em;
+}
+div.stButton > button,
+div.stFormSubmitButton > button {
+    width: 100%;
+    min-height: 3rem;
+    border-radius: 12px;
+    font-weight: 700;
+}
+div[data-testid="stMetric"] {
+    background: #17172A;
+    padding: 12px;
+    border-radius: 12px;
+}
+.small-note {
+    opacity: .75;
+    font-size: .9rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -34,8 +51,15 @@ st.markdown("Zarządzaj źródłami, ustawieniami i uruchomieniami z telefonu.")
 
 if not TOKEN or not REPO or "/" not in REPO:
     st.error("Brakuje konfiguracji Secrets w Streamlit Cloud.")
-    st.code('GITHUB_TOKEN = "github_pat_..."\nGITHUB_REPO = "twoj-login/cliprush-bot"\nGITHUB_BRANCH = "main"')
-    st.info("Dodaj te wartości w ustawieniach aplikacji Streamlit Cloud → Secrets. Nie wpisuj tokena w tym formularzu.")
+    st.code(
+        'GITHUB_TOKEN = "github_pat_..."\n'
+        'GITHUB_REPO = "SuperSebaXYT/cliprush-bot"\n'
+        'GITHUB_BRANCH = "main"'
+    )
+    st.info(
+        "Dodaj te wartości w ustawieniach aplikacji "
+        "Streamlit Cloud → Secrets."
+    )
     st.stop()
 
 HEADERS = {
@@ -44,189 +68,548 @@ HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
+
 def api_get(path, params=None):
-    r = requests.get(f"{API}/repos/{REPO}/{path}", headers=HEADERS, params=params, timeout=25)
-    if not r.ok:
-        raise RuntimeError(f"GitHub API error {r.status_code}: {r.text[:400]}")
-    return r.json()
+    response = requests.get(
+        f"{API}/repos/{REPO}/{path}",
+        headers=HEADERS,
+        params=params,
+        timeout=25,
+    )
+
+    if not response.ok:
+        raise RuntimeError(
+            f"GitHub API error {response.status_code}: "
+            f"{response.text[:400]}"
+        )
+
+    return response.json()
+
 
 def read_file(path):
     try:
-        data = api_get(f"contents/{path}", params={"ref": BRANCH})
-        raw = base64.b64decode(data["content"]).decode("utf-8")
+        data = api_get(
+            f"contents/{path}",
+            params={"ref": BRANCH},
+        )
+
+        raw = base64.b64decode(
+            data["content"]
+        ).decode("utf-8")
+
         return raw, data["sha"]
-    except RuntimeError as e:
-        if "404" in str(e):
+
+    except RuntimeError as exc:
+        if "404" in str(exc):
             return "", None
         raise
+
 
 def write_file(path, content, sha, message):
     body = {
         "message": message,
-        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "content": base64.b64encode(
+            content.encode("utf-8")
+        ).decode("ascii"),
         "branch": BRANCH,
     }
+
     if sha:
         body["sha"] = sha
-    r = requests.put(f"{API}/repos/{REPO}/contents/{path}", headers=HEADERS, json=body, timeout=25)
-    if not r.ok:
-        raise RuntimeError(f"Nie udało się zapisać {path}: {r.status_code} {r.text[:350]}")
-    return r.json()
+
+    response = requests.put(
+        f"{API}/repos/{REPO}/contents/{path}",
+        headers=HEADERS,
+        json=body,
+        timeout=25,
+    )
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Nie udało się zapisać {path}: "
+            f"{response.status_code} "
+            f"{response.text[:350]}"
+        )
+
+    return response.json()
+
 
 def trigger_workflow():
-    url = f"{API}/repos/{REPO}/actions/workflows/clipping.yml/dispatches"
-    r = requests.post(url, headers=HEADERS, json={"ref": BRANCH}, timeout=25)
-    if r.status_code not in (204, 200):
-        raise RuntimeError(f"Nie udało się uruchomić workflow: {r.status_code} {r.text[:350]}")
+    url = (
+        f"{API}/repos/{REPO}/actions/"
+        "workflows/clipping.yml/dispatches"
+    )
+
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"ref": BRANCH},
+        timeout=25,
+    )
+
+    if response.status_code not in (204, 200):
+        raise RuntimeError(
+            f"Nie udało się uruchomić workflow: "
+            f"{response.status_code} "
+            f"{response.text[:350]}"
+        )
+
 
 def recent_runs():
-    data = api_get("actions/workflows/clipping.yml/runs", params={"per_page": 5})
+    data = api_get(
+        "actions/workflows/clipping.yml/runs",
+        params={"per_page": 5},
+    )
+
     return data.get("workflow_runs", [])
+
+
+def clean_urls(text):
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+        and not line.strip().startswith("#")
+    ]
+
+
+def save_sources_and_config(
+    urls,
+    config,
+    sources_sha,
+    config_sha,
+):
+    source_content = urls.rstrip() + "\n"
+
+    write_file(
+        "sources.txt",
+        source_content,
+        sources_sha,
+        "Update authorized clipping sources",
+    )
+
+    write_file(
+        "config.json",
+        json.dumps(
+            config,
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
+        config_sha,
+        "Update clipping settings",
+    )
+
 
 try:
     config_text, config_sha = read_file("config.json")
     sources_text, sources_sha = read_file("sources.txt")
+
     if not config_text:
-        raise RuntimeError("Nie znaleziono config.json w repozytorium.")
+        raise RuntimeError(
+            "Nie znaleziono config.json w repozytorium."
+        )
+
     config = json.loads(config_text)
+
 except Exception as exc:
     st.error(f"Nie mogę odczytać repozytorium: {exc}")
     st.stop()
+
 
 with st.container(border=True):
     st.subheader("⚡ Sterowanie")
     st.write(f"Repozytorium: `{REPO}`")
     st.write(f"Branch: `{BRANCH}`")
-    st.caption("Zmiany zapisują się bezpośrednio w repozytorium. Nie umieszczaj tu kluczy ani prywatnych tokenów.")
+    st.caption(
+        "Zmiany są zapisywane bezpośrednio w repozytorium GitHub."
+    )
 
-tab_sources, tab_settings, tab_runs = st.tabs(["📺 Źródła", "⚙️ Ustawienia", "📊 Uruchomienia"])
+
+tab_sources, tab_settings, tab_runs = st.tabs([
+    "📺 Źródła",
+    "⚙️ Ustawienia",
+    "📊 Uruchomienia",
+])
+
 
 with tab_sources:
-    st.subheader("Źródła streamów")
-    st.caption("Jeden URL VOD na linię. Dodawaj wyłącznie materiały, które masz prawo ponownie publikować.")
+    st.subheader("Źródła materiałów")
+
+    st.caption(
+        "Jeden URL na linię. Dodawaj wyłącznie materiały, "
+        "które masz prawo pobierać i ponownie publikować."
+    )
+
     urls = st.text_area(
         "Lista adresów",
         value=sources_text,
         height=230,
         placeholder="https://...\nhttps://...",
         label_visibility="collapsed",
+        key="source_urls",
     )
-    cleaned = [line.strip() for line in urls.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+    cleaned = clean_urls(urls)
+
     st.metric("Aktywne adresy", len(cleaned))
-    if st.button("💾 Zapisz źródła", key="save_sources"):
+
+    if st.button(
+        "💾 Zapisz źródła",
+        key="save_sources",
+    ):
         try:
-            write_file("sources.txt", urls.rstrip() + "\n", sources_sha, "Update authorized clipping sources")
+            write_file(
+                "sources.txt",
+                urls.rstrip() + "\n",
+                sources_sha,
+                "Update authorized clipping sources",
+            )
+
             st.success("Zapisano źródła.")
             st.rerun()
+
         except Exception as exc:
             st.error(str(exc))
 
+
 with tab_settings:
     st.subheader("Ustawienia klipów")
+
     with st.form("settings_form"):
-        clips_per_source = st.slider("Klipy na źródło", 1, 5, int(config.get("clips_per_source", 2)))
-        duration = st.slider("Docelowa długość klipu (sekundy)", 20, 55, int(config.get("clip_duration_seconds", 35)))
-        max_sources = st.slider("Maksymalna liczba źródeł na uruchomienie", 1, 5, int(config.get("max_sources_per_run", 2)))
+        clips_per_source = st.slider(
+            "Klipy na źródło",
+            1,
+            5,
+            int(config.get("clips_per_source", 2)),
+        )
+
+        duration = st.slider(
+            "Docelowa długość klipu (sekundy)",
+            20,
+            55,
+            int(config.get("clip_duration_seconds", 35)),
+        )
+
+        max_sources = st.slider(
+            "Maksymalna liczba źródeł na uruchomienie",
+            1,
+            5,
+            int(config.get("max_sources_per_run", 2)),
+        )
+
         st.divider()
-        st.subheader("Automatyczny wybór VOD-ów")
-        auto_discovery = st.toggle("Automatycznie wyszukuj najnowsze VOD-y", value=bool(config.get("auto_discovery_enabled", True)))
+        st.subheader("Automatyczne wyszukiwanie")
+
+        auto_discovery = st.toggle(
+            "Automatycznie wyszukuj LIVE i VOD-y",
+            value=bool(
+                config.get("auto_discovery_enabled", True)
+            ),
+        )
+
+        default_channels = [
+            "https://www.youtube.com/@IShowSpeed",
+            "https://www.youtube.com/@KaiCenat",
+            "https://www.youtube.com/@CaseOh_",
+        ]
+
         discovery_channels_text = st.text_area(
             "Kanały YouTube, po jednym URL na linię",
-            value="\n".join(config.get("discovery_channels", [
-                "https://www.youtube.com/@IShowSpeed/videos",
-                "https://www.youtube.com/@KaiCenat/videos",
-                "https://www.youtube.com/@CaseOh_/videos",
-            ])),
+            value="\n".join(
+                config.get(
+                    "discovery_channels",
+                    default_channels,
+                )
+            ),
             height=110,
         )
-        scan_per_channel = st.slider("Ile najnowszych filmów sprawdzać z każdego kanału", 5, 50,
-                                     int(config.get("discovery_scan_per_channel", 30)), step=5)
-        max_age_days = st.slider("Maksymalny wiek VOD-a (dni)", 1, 90, int(config.get("max_source_age_days", 30)))
-        min_source_minutes = st.slider("Minimalna długość źródła (minuty)", 5, 60,
-                                       max(5, int(config.get("min_source_duration_seconds", 600)) // 60))
-        language = st.selectbox("Język transkrypcji", ["en", "pl", "auto"],
-                                index=["en", "pl", "auto"].index(config.get("language", "en"))
-                                if config.get("language", "en") in ["en", "pl", "auto"] else 0)
-        model = st.selectbox("Model Whisper", ["base", "small", "medium"],
-                             index=["base", "small", "medium"].index(config.get("whisper_model", "small"))
-                             if config.get("whisper_model", "small") in ["base", "small", "medium"] else 1)
+
+        scan_per_channel = st.slider(
+            "Ile materiałów sprawdzać z każdego kanału",
+            5,
+            50,
+            int(config.get("discovery_scan_per_channel", 30)),
+            step=5,
+        )
+
+        max_age_days = st.slider(
+            "Maksymalny wiek VOD-a (dni)",
+            1,
+            90,
+            int(config.get("max_source_age_days", 30)),
+        )
+
+        min_source_minutes = st.slider(
+            "Minimalna długość źródła (minuty)",
+            5,
+            60,
+            max(
+                5,
+                int(
+                    config.get(
+                        "min_source_duration_seconds",
+                        600,
+                    )
+                ) // 60,
+            ),
+        )
+
+        live_capture_minutes = st.slider(
+            "Czas nagrywania LIVE (minuty)",
+            2,
+            60,
+            max(
+                2,
+                int(
+                    config.get(
+                        "live_capture_seconds",
+                        480,
+                    )
+                ) // 60,
+            ),
+        )
+
+        st.divider()
+        st.subheader("Transkrypcja")
+
+        language_options = ["en", "pl", "auto"]
+        current_language = config.get("language", "en")
+
+        language = st.selectbox(
+            "Język transkrypcji",
+            language_options,
+            index=(
+                language_options.index(current_language)
+                if current_language in language_options
+                else 0
+            ),
+        )
+
+        model_options = ["base", "small", "medium"]
+        current_model = config.get("whisper_model", "small")
+
+        model = st.selectbox(
+            "Model Whisper",
+            model_options,
+            index=(
+                model_options.index(current_model)
+                if current_model in model_options
+                else 1
+            ),
+        )
+
         st.divider()
         st.subheader("YouTube")
-        publish = st.toggle("Automatycznie publikuj na YouTube", value=bool(config.get("publish", False)))
-        privacy_options = ["private", "unlisted", "public"]
-        privacy = st.selectbox("Widoczność", privacy_options,
-                               index=privacy_options.index(config.get("privacy_status", "private"))
-                               if config.get("privacy_status", "private") in privacy_options else 0)
-        title_prefix = st.text_input("Początek tytułu", value=config.get("title_prefix", "ClipRush"))
-        description = st.text_area("Opis", value=config.get("description", ""))
-        tags_text = st.text_input("Tagi oddzielone przecinkami", value=", ".join(config.get("tags", [])))
-        submitted = st.form_submit_button("💾 Zapisz ustawienia")
-    if submitted:
-        if publish and not cleaned and not auto_discovery:
-            st.error("Włącz automatyczne wyszukiwanie albo dodaj źródła dozwolone do ponownej publikacji.")
+
+        publish = st.toggle(
+            "Automatycznie publikuj na YouTube",
+            value=bool(config.get("publish", False)),
+        )
+
+        privacy_options = [
+            "private",
+            "unlisted",
+            "public",
+        ]
+
+        current_privacy = config.get(
+            "privacy_status",
+            "private",
+        )
+
+        privacy = st.selectbox(
+            "Widoczność",
+            privacy_options,
+            index=(
+                privacy_options.index(current_privacy)
+                if current_privacy in privacy_options
+                else 0
+            ),
+        )
+
+        title_prefix = st.text_input(
+            "Początek tytułu",
+            value=config.get("title_prefix", "ClipRush"),
+        )
+
+        description = st.text_area(
+            "Opis",
+            value=config.get("description", ""),
+        )
+
+        tags_text = st.text_input(
+            "Tagi oddzielone przecinkami",
+            value=", ".join(config.get("tags", [])),
+        )
+
+        st.divider()
+
+        save_settings = st.form_submit_button(
+            "💾 Zapisz ustawienia",
+        )
+
+        save_and_run = st.form_submit_button(
+            "🚀 Zapisz ustawienia i uruchom bota",
+            type="primary",
+        )
+
+    if save_settings or save_and_run:
+        new_config = dict(config)
+
+        new_config.update({
+            "clips_per_source": clips_per_source,
+            "clip_duration_seconds": duration,
+            "min_clip_seconds": min(20, duration),
+            "max_clip_seconds": min(55, duration),
+            "max_sources_per_run": max_sources,
+            "auto_discovery_enabled": auto_discovery,
+            "discovery_channels": [
+                item.strip()
+                for item in discovery_channels_text.splitlines()
+                if item.strip()
+                and not item.strip().startswith("#")
+            ],
+            "discovery_scan_per_channel": scan_per_channel,
+            "max_source_age_days": max_age_days,
+            "min_source_duration_seconds": (
+                min_source_minutes * 60
+            ),
+            "live_capture_seconds": (
+                live_capture_minutes * 60
+            ),
+            "language": language,
+            "whisper_model": model,
+            "publish": publish,
+            "privacy_status": privacy,
+            "title_prefix": title_prefix,
+            "description": description,
+            "tags": [
+                item.strip()
+                for item in tags_text.split(",")
+                if item.strip()
+            ],
+        })
+
+        current_urls = st.session_state.get(
+            "source_urls",
+            sources_text,
+        )
+
+        current_sources = clean_urls(current_urls)
+
+        if save_and_run and not current_sources and not auto_discovery:
+            st.error(
+                "Włącz automatyczne wyszukiwanie "
+                "albo dodaj źródła."
+            )
+
+        elif save_and_run and publish and not current_sources and not auto_discovery:
+            st.error(
+                "Nie można publikować bez skonfigurowanych źródeł."
+            )
+
         else:
-            new_config = dict(config)
-            new_config.update({
-                "clips_per_source": clips_per_source,
-                "clip_duration_seconds": duration,
-                "min_clip_seconds": min(20, duration),
-                "max_clip_seconds": min(55, duration),
-                "max_sources_per_run": max_sources,
-                "auto_discovery_enabled": auto_discovery,
-                "discovery_channels": [x.strip() for x in discovery_channels_text.splitlines()
-                                        if x.strip() and not x.strip().startswith("#")],
-                "discovery_scan_per_channel": scan_per_channel,
-                "max_source_age_days": max_age_days,
-                "min_source_duration_seconds": min_source_minutes * 60,
-                "language": language,
-                "whisper_model": model,
-                "publish": publish,
-                "privacy_status": privacy,
-                "title_prefix": title_prefix,
-                "description": description,
-                "tags": [x.strip() for x in tags_text.split(",") if x.strip()],
-            })
             try:
-                write_file("config.json", json.dumps(new_config, indent=2, ensure_ascii=False) + "\n",
-                           config_sha, "Update clipping settings")
-                st.success("Zapisano ustawienia.")
+                save_sources_and_config(
+                    current_urls,
+                    new_config,
+                    sources_sha,
+                    config_sha,
+                )
+
+                if save_and_run:
+                    trigger_workflow()
+
+                    st.success(
+                        "Zapisano ustawienia i uruchomiono pipeline."
+                    )
+
+                    st.info(
+                        "Postęp sprawdzisz w zakładce Uruchomienia."
+                    )
+
+                else:
+                    st.success("Zapisano ustawienia.")
+
                 st.rerun()
+
             except Exception as exc:
                 st.error(str(exc))
+
     if publish and privacy == "public":
-        st.warning("Publikacja publiczna jest włączona. Najpierw sprawdź jakość klipów i prawa do materiałów.")
+        st.warning(
+            "Publikacja publiczna jest włączona. "
+            "Najpierw sprawdź jakość klipów i prawa do materiałów."
+        )
+
 
 with tab_runs:
     st.subheader("Ostatnie uruchomienia")
-    if st.button("🔄 Odśwież status", key="refresh_runs"):
+
+    if st.button(
+        "🔄 Odśwież status",
+        key="refresh_runs",
+    ):
         st.rerun()
+
     try:
         runs = recent_runs()
+
         if not runs:
-            st.info("Brak uruchomień. Zapisz źródła i uruchom pipeline.")
+            st.info("Brak uruchomień.")
+
         for run in runs:
-            status = run.get("conclusion") or run.get("status", "unknown")
-            st.markdown(f"**{run.get('display_title', run.get('name', 'Workflow'))}**")
-            st.caption(f"{status} · {run.get('created_at', '')} · #{run.get('run_number', '')}")
+            status = (
+                run.get("conclusion")
+                or run.get("status", "unknown")
+            )
+
+            st.markdown(
+                f"**{run.get('display_title', run.get('name', 'Workflow'))}**"
+            )
+
+            st.caption(
+                f"{status} · "
+                f"{run.get('created_at', '')} · "
+                f"#{run.get('run_number', '')}"
+            )
+
             if run.get("html_url"):
-                st.link_button("Otwórz logi na GitHubie", run["html_url"], use_container_width=True)
+                st.link_button(
+                    "Otwórz logi na GitHubie",
+                    run["html_url"],
+                    use_container_width=True,
+                )
+
     except Exception as exc:
-        st.error(f"Nie udało się pobrać uruchomień: {exc}")
+        st.error(
+            f"Nie udało się pobrać uruchomień: {exc}"
+        )
+
 
 st.divider()
-st.subheader("Uruchom clipping")
-st.write(f"Ręczne źródła: **{len(cleaned)}** · Auto-discovery: **{'włączone' if config.get('auto_discovery_enabled', False) else 'wyłączone'}** · Klipów na źródło: **{config.get('clips_per_source', 2)}**")
-if st.button("🚀 Zapisz najpierw ustawienia, potem uruchom bota", type="primary", key="run_bot"):
-    try:
-        # Prevent dispatch when there are no source URLs.
-        current_sources, _ = read_file("sources.txt")
-        has_manual = bool([x for x in current_sources.splitlines() if x.strip() and not x.strip().startswith("#")])
-        if not has_manual and not config.get("auto_discovery_enabled", False):
-            st.error("Włącz automatyczne wyszukiwanie w Ustawieniach albo dodaj adres VOD.")
-        else:
-            trigger_workflow()
-            st.success("Wysłano żądanie uruchomienia. Sprawdź zakładkę Uruchomienia za chwilę.")
-    except Exception as exc:
-        st.error(str(exc))
 
-st.caption("ClipRush Mobile · panel steruje GitHub Actions; renderowanie odbywa się w runnerze GitHub.")
+st.subheader("Status konfiguracji")
+
+st.write(
+    f"Ręczne źródła: **{len(clean_urls(st.session_state.get('source_urls', sources_text)))}**"
+)
+
+st.write(
+    "Auto-discovery: **"
+    + (
+        "włączone"
+        if config.get("auto_discovery_enabled", False)
+        else "wyłączone"
+    )
+    + "**"
+)
+
+st.write(
+    f"Klipów na źródło: **{config.get('clips_per_source', 2)}**"
+)
+
+st.caption(
+    "ClipRush Mobile · panel steruje GitHub Actions. "
+    "Pobieranie, transkrypcja i renderowanie odbywają się na runnerze GitHub."
+)
