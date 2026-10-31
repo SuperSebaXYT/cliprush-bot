@@ -132,11 +132,11 @@ class MainActivity : Activity() {
         )
         for (i in 0 until 7) {
             val bar = View(this).apply {
-                background = android.graphics.drawable.GradientDrawable().apply {
+                this.background = android.graphics.drawable.GradientDrawable().apply {
                     setColor(barColors[i])
                     cornerRadius = dp(5).toFloat()
                 }
-                transformPivotY = dp(22).toFloat()
+                pivotY = dp(22).toFloat()
             }
             val params = LinearLayout.LayoutParams(dp(6), dp(34)).apply {
                 leftMargin = dp(5)
