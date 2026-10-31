@@ -327,45 +327,117 @@ def transcribe_video(
 
 
 def score_segment(segment: dict) -> float:
+    """Fallback score used when the semantic humor model is unavailable."""
     text = segment["text"].lower()
+    words = re.findall(r"[a-z']+", text)
     score = 0.0
 
-    hooks = [
-        "what",
-        "why",
-        "how",
-        "no way",
-        "oh my god",
-        "wait",
-        "bro",
-        "crazy",
-        "insane",
-        "look",
-        "listen",
-        "impossible",
-        "actually",
-        "never",
-        "help",
-        "stop",
+    reaction_phrases = [
+        "no way", "oh my god", "what the hell", "what the fuck",
+        "are you serious", "you gotta be kidding", "bro what",
+        "i'm dead", "im dead", "that's crazy", "thats crazy",
+        "get out", "shut up", "i can't", "i cannot",
+        "what just happened", "did you see that",
+    ]
+    laugh_terms = [
+        "haha", "hahaha", "lol", "lmao", "laughing",
+        "funny", "joke", "kidding", "bruh",
+    ]
+    surprise_terms = [
+        "insane", "crazy", "wild", "unbelievable", "impossible",
+        "screaming", "scream", "bro", "nah", "wait",
+    ]
+    flat_terms = [
+        "welcome back", "today we're", "make sure to subscribe",
+        "don't forget to like", "sponsor", "check out",
     ]
 
-    for hook in hooks:
-        if hook in text:
-            score += 2.0
+    for phrase in reaction_phrases:
+        if phrase in text:
+            score += 3.0
+    for term in laugh_terms:
+        if term in text:
+            score += 2.5
+    for term in surprise_terms:
+        if term in words:
+            score += 0.8
 
-    if "?" in text:
-        score += 1.5
-
-    if "!" in text:
-        score += 1.0
-
-    if len(text.split()) >= 8:
-        score += 1.0
-
-    if len(text.split()) <= 2:
+    if "?" in text or "!" in text:
+        score += 0.8
+    if len(words) >= 7:
+        score += 0.5
+    if len(words) <= 2:
         score -= 1.0
+    if any(term in text for term in flat_terms):
+        score -= 3.0
 
     return score
+
+
+def score_with_gemini(candidates: list[dict]) -> list[dict]:
+    """Rank transcript windows for comedy using Gemini when an API key exists."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key or not candidates:
+        print("Gemini humor ranking unavailable; using transcript fallback.", flush=True)
+        return candidates
+
+    import requests
+
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    compact = [
+        {"id": i, "transcript": item["context"][:1800]}
+        for i, item in enumerate(candidates)
+    ]
+    prompt = (
+        "You are ranking short streamer VOD moments for genuinely funny YouTube Shorts. "
+        "Score each transcript from 0 to 10 for comedy potential. Reward an actual joke, "
+        "unexpected absurdity, funny argument, sharp punchline, embarrassing mishap, "
+        "or a strong comedic reaction. Do NOT reward generic hype words, ordinary "
+        "conversation, greetings, repeated profanity, or a question by itself. "
+        "Prefer a complete setup-payoff moment with enough context. "
+        "Return ONLY valid JSON: {\"scores\":[{\"id\":0,\"score\":0,\"reason\":\"short reason\"}]}. "
+        "Score these candidates:\n" + json.dumps(compact, ensure_ascii=False)
+    )
+
+    try:
+        response = requests.post(
+            endpoint,
+            params={"key": api_key},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "responseMimeType": "application/json",
+                },
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+        body = response.json()
+        raw = body["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(raw)
+        scores = {
+            int(item["id"]): item
+            for item in parsed.get("scores", [])
+            if "id" in item and "score" in item
+        }
+        for i, candidate in enumerate(candidates):
+            result = scores.get(i)
+            if result:
+                candidate["score"] = float(result["score"])
+                candidate["reason"] = str(result.get("reason", ""))[:180]
+        print(
+            f"Gemini humor ranking scored {len(scores)}/{len(candidates)} candidates.",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"WARNING: Gemini humor ranking failed: {exc}; using fallback scores.", flush=True)
+
+    return candidates
 
 
 def select_clips(
@@ -373,59 +445,61 @@ def select_clips(
     config: dict,
     video_duration: float,
 ) -> list[dict]:
-    clips_per_source = max(
-        1,
-        int(config.get("clips_per_source", 2)),
-    )
+    clips_per_source = max(1, int(config.get("clips_per_source", 1)))
+    target_duration = int(config.get("clip_duration_seconds", 35))
+    min_duration = int(config.get("min_clip_seconds", 20))
+    max_duration = int(config.get("max_clip_seconds", 55))
 
-    target_duration = int(
-        config.get("clip_duration_seconds", 35)
-    )
-
-    min_duration = int(
-        config.get("min_clip_seconds", 20)
-    )
-
-    max_duration = int(
-        config.get("max_clip_seconds", 55)
-    )
-
-    windows = []
-
+    candidates = []
     for segment in segments:
         center = (segment["start"] + segment["end"]) / 2
-
         start = max(0, center - target_duration / 2)
         end = min(video_duration, start + target_duration)
 
         if end - start < min_duration:
             continue
-
         if end - start > max_duration:
             end = start + max_duration
-
         if end > video_duration:
             end = video_duration
             start = max(0, end - target_duration)
-
         if end - start < min_duration:
             continue
 
-        windows.append({
+        context = " ".join(
+            item["text"]
+            for item in segments
+            if item["end"] > start - 8 and item["start"] < end + 8
+        )
+        candidates.append({
             "start": start,
             "end": end,
             "score": score_segment(segment),
             "text": segment["text"],
+            "context": context,
         })
 
-    windows.sort(
-        key=lambda item: item["score"],
-        reverse=True,
-    )
+    # Remove near-duplicate candidate windows before calling the model.
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    shortlist = []
+    for item in candidates:
+        if any(
+            abs(item["start"] - old["start"]) < target_duration * 0.55
+            for old in shortlist
+        ):
+            continue
+        shortlist.append(item)
+        if len(shortlist) >= 24:
+            break
+
+    shortlist = score_with_gemini(shortlist)
+    shortlist.sort(key=lambda item: item["score"], reverse=True)
 
     selected = []
-
-    for candidate in windows:
+    minimum_score = float(config.get("minimum_humor_score", 5.5))
+    for candidate in shortlist:
+        if candidate["score"] < minimum_score:
+            continue
         overlaps = any(
             not (
                 candidate["end"] <= existing["start"]
@@ -433,19 +507,26 @@ def select_clips(
             )
             for existing in selected
         )
-
         if overlaps:
             continue
-
         selected.append(candidate)
-
         if len(selected) >= clips_per_source:
             break
 
-    selected.sort(key=lambda item: item["start"])
+    for item in selected:
+        item.pop("context", None)
+        if item.get("reason"):
+            print(
+                f"Humor pick: {item['reason']} (score {item['score']:.1f}/10)",
+                flush=True,
+            )
 
-    return selected
-
+    print(
+        f"Humor selector: {len(selected)} clip(s) passed "
+        f"minimum score {minimum_score:.1f}/10.",
+        flush=True,
+    )
+    return sorted(selected, key=lambda item: item["start"])
 
 def create_srt(
     segments: list[dict],
