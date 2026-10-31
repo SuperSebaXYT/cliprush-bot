@@ -109,6 +109,47 @@ def run_command(
         )
 
 
+def fetch_guest_visitor_data() -> str | None:
+    """Fetch a public YouTube guest Visitor Data value without logging in."""
+    import requests
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        response = requests.get(
+            "https://www.youtube.com/",
+            headers=headers,
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"Guest Visitor Data request failed: {exc}", flush=True)
+        return None
+
+    # YouTube currently exposes this value in its homepage ytcfg payload.
+    patterns = (
+        r'"VISITOR_DATA"\\s*:\\s*"([^"]+)"',
+        r'"visitorData"\\s*:\\s*"([^"]+)"',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, response.text)
+        if match:
+            value = match.group(1)
+            if value and len(value) > 10:
+                print("Fetched a public YouTube guest Visitor Data value.", flush=True)
+                return value
+
+    print("YouTube homepage did not expose a Visitor Data value.", flush=True)
+    return None
+
+
 def download_source(
     source: dict,
     work_dir: Path,
@@ -146,126 +187,128 @@ def download_source(
 
     cookies_path = work_dir / "youtube_cookies.txt"
     cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
-
     cookie_args = []
 
     if cookies:
         cookies_path.write_text(cookies, encoding="utf-8")
         cookie_args = ["--cookies", str(cookies_path)]
-        print("Using YOUTUBE_COOKIES for yt-dlp.", flush=True)
+        print("Trying configured YOUTUBE_COOKIES first.", flush=True)
     else:
-        print(
-            "WARNING: YOUTUBE_COOKIES is not configured. "
-            "YouTube may block downloads.",
-            flush=True,
+        print("No YOUTUBE_COOKIES configured; guest mode will be used.", flush=True)
+
+    # The public guest Visitor Data path is a fallback, not an account session.
+    # yt-dlp requires webpage/config requests to be skipped when overriding it.
+    visitor_data = fetch_guest_visitor_data()
+    download_modes = []
+
+    if cookie_args:
+        download_modes.append((
+            "configured cookies",
+            cookie_args,
+            ["--extractor-args", "youtube:player-client=mweb"],
+        ))
+
+    if visitor_data:
+        download_modes.append((
+            "guest Visitor Data (no cookies)",
+            [],
+            [
+                "--extractor-args",
+                "youtubetab:skip=webpage",
+                "--extractor-args",
+                (
+                    "youtube:player-client=mweb;"
+                    "player_skip=webpage,configs;"
+                    f"visitor_data={visitor_data}"
+                ),
+            ],
+        ))
+
+    if not download_modes:
+        raise RuntimeError(
+            "No YouTube authentication mode is available: cookies are empty "
+            "and guest Visitor Data could not be fetched."
         )
 
-    # Najpierw próbujemy pojedynczego formatu.
-    # Potem standardowego połączenia obrazu i dźwięku.
     format_selectors = [
         "best[ext=mp4]/best",
         "best",
         "bv*+ba/b",
     ]
-
     last_error = None
 
     try:
-        for selector in format_selectors:
-            print(
-                f"Trying yt-dlp format selector: {selector}",
-                flush=True,
-            )
+        for mode_name, mode_args, extractor_args in download_modes:
+            print(f"Starting YouTube download mode: {mode_name}", flush=True)
 
-            command = [
-                sys.executable,
-                "-m",
-                "yt_dlp",
-                "--no-playlist",
-                "--no-warnings",
-                "--retries",
-                "3",
-                "--fragment-retries",
-                "3",
-                "--extractor-retries",
-                "3",
-                "--js-runtimes",
-                "node",
-                "--extractor-args",
-                "youtube:player-client=mweb",
-                "--format",
-                selector,
-                "--merge-output-format",
-                "mp4",
-                "-o",
-                str(output_template),
-            ]
-
-            command.extend(cookie_args)
-            command.append(source["url"])
-
-            try:
-                run_command(
-                    command,
-                    f"Downloading VOD: {source['title']}",
-                )
-            except Exception as exc:
-                last_error = exc
+            for selector in format_selectors:
                 print(
-                    f"Format selector failed: {selector}. "
-                    f"Trying next option.",
+                    f"Trying yt-dlp format selector: {selector}",
                     flush=True,
                 )
 
-                # Capture the formats yt-dlp can actually see. This makes
-                # YouTube client / cookie / PO-token failures diagnosable.
-                diagnostic_command = [
+                command = [
                     sys.executable,
                     "-m",
                     "yt_dlp",
                     "--no-playlist",
                     "--no-warnings",
-                    "--list-formats",
+                    "--retries",
+                    "2",
+                    "--fragment-retries",
+                    "2",
+                    "--extractor-retries",
+                    "2",
                     "--js-runtimes",
                     "node",
-                    "--extractor-args",
-                    "youtube:player-client=mweb",
                 ]
-                diagnostic_command.extend(cookie_args)
-                diagnostic_command.append(source["url"])
+                command.extend(extractor_args)
+                command.extend([
+                    "--format",
+                    selector,
+                    "--merge-output-format",
+                    "mp4",
+                    "-o",
+                    str(output_template),
+                ])
+                command.extend(mode_args)
+                command.append(source["url"])
 
                 try:
                     run_command(
-                        diagnostic_command,
-                        f"Diagnosing available formats: {source['title']}",
+                        command,
+                        f"Downloading VOD ({mode_name}): {source['title']}",
                     )
-                except Exception as diagnostic_error:
+                except Exception as exc:
+                    last_error = exc
                     print(
-                        f"Format diagnostic failed: {diagnostic_error}",
+                        f"Download mode '{mode_name}' failed for "
+                        f"format '{selector}': {exc}",
                         flush=True,
                     )
-                continue
+                    continue
 
-            candidates = [
-                path
-                for path in work_dir.glob(f"{source_id}.*")
-                if path.suffix.lower() in {
-                    ".mp4",
-                    ".mkv",
-                    ".webm",
-                    ".mov",
-                }
-                and path.stat().st_size > 0
-            ]
+                candidates = [
+                    path
+                    for path in work_dir.glob(f"{source_id}.*")
+                    if path.suffix.lower() in {
+                        ".mp4",
+                        ".mkv",
+                        ".webm",
+                        ".mov",
+                    }
+                    and path.stat().st_size > 0
+                ]
 
-            if candidates:
-                return max(
-                    candidates,
-                    key=lambda path: path.stat().st_size,
-                )
+                if candidates:
+                    return max(
+                        candidates,
+                        key=lambda path: path.stat().st_size,
+                    )
 
         raise RuntimeError(
-            f"All yt-dlp format selectors failed. Last error: {last_error}"
+            "All YouTube download modes and format selectors failed. "
+            f"Last error: {last_error}"
         )
 
     finally:
