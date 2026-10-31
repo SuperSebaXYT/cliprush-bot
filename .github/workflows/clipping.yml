@@ -1,0 +1,62 @@
+name: AI Clipping Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ai-clipping-bot
+  cancel-in-progress: false
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Run clipping pipeline
+        env:
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: python main.py
+
+      - name: Save processed-video history
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add processed_videos.json
+          if git diff --cached --quiet; then
+            echo "No processed-video history changes."
+          else
+            git commit -m "Update processed VOD history [skip ci]"
+            git push
+          fi
+
+      - name: Upload generated clips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-clips
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 3
