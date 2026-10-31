@@ -375,106 +375,139 @@ def score_segment(segment: dict) -> float:
 
 
 def score_with_groq(candidates: list[dict], config: dict) -> list[dict]:
-    """Use Groq chat completions to identify complete funny moments and boundaries."""
+    """Analyze small batches so long VOD transcripts do not exceed Groq payload limits."""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key or not candidates:
         print("Groq boundary selection unavailable; using transcript fallback.", flush=True)
-        return candidates
+        return []
 
     import requests
 
     model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
     endpoint = "https://api.groq.com/openai/v1/chat/completions"
-    compact = [
-        {
-            "id": i,
-            "window_start": round(item["start"], 2),
-            "window_end": round(item["end"], 2),
-            "transcript": item["context"][:5000],
-        }
-        for i, item in enumerate(candidates)
-    ]
-    prompt = (
-        "You are an expert comedy editor for streamer YouTube Shorts. "
-        "For each candidate transcript, decide whether it contains a genuinely funny "
-        "complete moment. Find the WHOLE moment: include enough setup before the joke "
-        "and the reaction/payoff after it. Do not cut in the middle of a sentence, "
-        "joke, argument, or reaction. Do not choose ordinary conversation or hype "
-        "without a funny event. Choose precise absolute start and end timestamps in "
-        "seconds using the timestamps attached to each transcript line. "
-        "The clip may be any length from 12 to 75 seconds; choose the natural length, "
-        "not a fixed duration. Score comedy from 0 to 10. If no real funny moment "
-        "exists, score below 5.5. Return ONLY valid JSON in this schema: "
-        "{\"moments\":[{\"id\":0,\"score\":8.5,\"start\":123.4,"
-        "\"end\":158.2,\"reason\":\"short explanation\"}]}. "
-        "Only return moments with score at least 5.5. "
-        "Candidates:\\n" + json.dumps(compact, ensure_ascii=False)
+
+    # A 30-window request can exceed Groq's HTTP payload limit.
+    # Keep each request deliberately small and combine the results locally.
+    batch_size = max(1, min(4, int(config.get("groq_batch_size", 3))))
+    ranked = []
+    successful_batches = 0
+    failed_batches = 0
+
+    for batch_number, offset in enumerate(range(0, len(candidates), batch_size), start=1):
+        batch = candidates[offset:offset + batch_size]
+        compact = [
+            {
+                "id": i,
+                "window_start": round(item["start"], 2),
+                "window_end": round(item["end"], 2),
+                "transcript": item["context"][:5000],
+            }
+            for i, item in enumerate(batch)
+        ]
+
+        prompt = (
+            "You are an expert comedy editor for streamer YouTube Shorts. "
+            "For each candidate transcript, decide whether it contains a genuinely funny "
+            "complete moment. Find the WHOLE moment: include enough setup before the joke "
+            "and the reaction/payoff after it. Do not cut in the middle of a sentence, "
+            "joke, argument, or reaction. Do not choose ordinary conversation or hype "
+            "without a funny event. Choose precise absolute start and end timestamps in "
+            "seconds using the timestamps attached to each transcript line. "
+            "The clip may be any length from 12 to 75 seconds; choose the natural length, "
+            "not a fixed duration. Score comedy from 0 to 10. If no real funny moment "
+            "exists, score below 5.5. Return ONLY valid JSON in this schema: "
+            "{\"moments\":[{\"id\":0,\"score\":8.5,\"start\":123.4,"
+            "\"end\":158.2,\"reason\":\"short explanation\"}]}. "
+            "Only return moments with score at least 5.5. "
+            "Candidates:\n" + json.dumps(compact, ensure_ascii=False)
+        )
+
+        try:
+            response = requests.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You identify genuinely funny streamer moments. Return valid JSON only.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=90,
+            )
+            response.raise_for_status()
+            raw = response.json()["choices"][0]["message"]["content"]
+            parsed = json.loads(raw)
+
+            for result in parsed.get("moments", []):
+                idx = int(result["id"])
+                if idx < 0 or idx >= len(batch):
+                    continue
+
+                original = batch[idx]
+                score = float(result["score"])
+                start_time = max(original["start"], float(result["start"]))
+                end_time = min(original["end"], float(result["end"]))
+                duration = end_time - start_time
+
+                if score < 5.5 or duration < 12 or duration > 75:
+                    continue
+
+                ranked.append({
+                    "start": start_time,
+                    "end": end_time,
+                    "score": score,
+                    "text": original["text"],
+                    "reason": str(result.get("reason", ""))[:180],
+                })
+
+            successful_batches += 1
+            print(
+                f"Groq batch {batch_number}: analyzed {len(batch)} window(s), "
+                f"found {len(parsed.get('moments', []))} candidate moment(s).",
+                flush=True,
+            )
+
+        except Exception as exc:
+            failed_batches += 1
+            print(
+                f"WARNING: Groq batch {batch_number} failed: {exc}. "
+                "Using local transcript scoring for this batch.",
+                flush=True,
+            )
+
+            # Keep the pipeline useful if Groq is temporarily unavailable.
+            # Use a 35-second section around the strongest point in each window.
+            for original in batch:
+                duration = min(35.0, original["end"] - original["start"])
+                if duration < 12:
+                    continue
+                center = (original["start"] + original["end"]) / 2
+                start_time = max(original["start"], center - duration / 2)
+                end_time = min(original["end"], start_time + duration)
+                ranked.append({
+                    "start": start_time,
+                    "end": end_time,
+                    "score": float(original["score"]),
+                    "text": original["text"],
+                    "reason": "Local transcript-scoring fallback",
+                })
+
+    print(
+        f"Groq analysis complete: {successful_batches} successful batch(es), "
+        f"{failed_batches} failed batch(es), {len(ranked)} moment(s) returned "
+        f"from {len(candidates)} windows using {model}.",
+        flush=True,
     )
-
-    try:
-        response = requests.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You identify genuinely funny streamer moments. Return valid JSON only.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=90,
-        )
-        response.raise_for_status()
-        raw = response.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(raw)
-        ranked = []
-
-        for result in parsed.get("moments", []):
-            idx = int(result["id"])
-            if idx < 0 or idx >= len(candidates):
-                continue
-            original = candidates[idx]
-            score = float(result["score"])
-            start_time = float(result["start"])
-            end_time = float(result["end"])
-
-            # Model boundaries must stay inside the analyzed window.
-            start_time = max(original["start"], start_time)
-            end_time = min(original["end"], end_time)
-            duration = end_time - start_time
-            if score < 5.5 or duration < 12 or duration > 75:
-                continue
-
-            ranked.append({
-                "start": start_time,
-                "end": end_time,
-                "score": score,
-                "text": original["text"],
-                "reason": str(result.get("reason", ""))[:180],
-            })
-
-        print(
-            f"Groq found {len(ranked)} complete funny moment(s) "
-            f"from {len(candidates)} analyzed windows using {model}.",
-            flush=True,
-        )
-        return ranked
-    except Exception as exc:
-        print(
-            f"WARNING: Groq moment detection failed: {exc}; "
-            "using automatic transcript fallback.",
-            flush=True,
-        )
-        return candidates
-
+    return ranked
 
 def select_clips(
     segments: list[dict],
